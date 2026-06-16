@@ -1,0 +1,15 @@
+name: snagger
+
+services:
+  snagger:
+    build: .
+    container_name: snagger
+    restart: unless-stopped
+    ports:
+      - "${SNAGGER_HOST_PORT:-8090}:8080"
+    environment:
+      SNAGGER_OUTPUT_DIR: /downloads
+      SNAGGER_USERNAME: ${SNAGGER_USERNAME:-}
+      SNAGGER_PASSWORD: ${SNAGGER_PASSWORD:-}
+    volumes:
+      - ${SNAGGER_DOWNLOADS_DIR:-/mnt/tang/media/downloads}:/downloads

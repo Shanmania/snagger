@@ -1,0 +1,21 @@
+[project]
+name = "snagger"
+version = "0.1.0"
+description = "Web app for saving permitted YouTube URLs as MP3 audio or MP4 video."
+requires-python = ">=3.10"
+dependencies = [
+    "flask",
+    "yt-dlp",
+    "imageio-ffmpeg",
+]
+
+[project.scripts]
+snagger = "youtube_audio_extractor.app:main"
+snagger-web = "youtube_audio_extractor.web:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

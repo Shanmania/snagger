@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import queue
+import re
+import shutil
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+
+QUALITY_CHOICES = {
+    "Maximum VBR quality": "0",
+    "320 kbps CBR": "320",
+    "256 kbps CBR": "256",
+    "192 kbps CBR": "192",
+}
+
+MEDIA_FORMAT_CHOICES = {
+    "mp3": "MP3 audio",
+    "mp4": "MP4 video",
+}
+
+
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+@dataclass(frozen=True)
+class DownloadSettings:
+    url: str
+    output_dir: Path
+    quality_label: str
+    quality_value: str
+    keep_source_audio: bool
+    output_format: str = "mp3"
+
+
+class QueueLogger:
+    def __init__(self, events: "queue.Queue[tuple[str, Any]]") -> None:
+        self.events = events
+
+    def debug(self, message: str) -> None:
+        message = clean_message(message)
+        if not message or message.startswith("[debug]"):
+            return
+        if message.startswith("[download]") and "%" in message:
+            return
+        self.events.put(("log", message))
+
+    def warning(self, message: str) -> None:
+        self.events.put(("log", f"Warning: {clean_message(message)}"))
+
+    def error(self, message: str) -> None:
+        self.events.put(("log", f"Error: {clean_message(message)}"))
+
+
+def clean_message(value: object) -> str:
+    return ANSI_RE.sub("", str(value)).strip()
+
+
+def default_output_dir() -> Path:
+    downloads = Path.home() / "Downloads"
+    return downloads if downloads.exists() else Path.cwd()
+
+
+def resolve_ffmpeg() -> str | None:
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+
+        ffmpeg = get_ffmpeg_exe()
+        if ffmpeg and Path(ffmpeg).exists():
+            return ffmpeg
+    except Exception:
+        pass
+
+    return shutil.which("ffmpeg") or shutil.which("ffmpeg.exe")
+
+
+def build_ydl_options(
+    settings: DownloadSettings,
+    events: "queue.Queue[tuple[str, Any]]",
+) -> dict[str, Any]:
+    if settings.output_format not in MEDIA_FORMAT_CHOICES:
+        raise RuntimeError("Choose MP3 or MP4 output.")
+
+    ffmpeg_path = resolve_ffmpeg()
+    if not ffmpeg_path:
+        raise RuntimeError(
+            "FFmpeg was not found. Reinstall the app, rebuild with build_windows.ps1, "
+            "or install FFmpeg and add it to PATH."
+        )
+
+    def progress_hook(data: dict[str, Any]) -> None:
+        status = data.get("status")
+        if status == "downloading":
+            total = data.get("total_bytes") or data.get("total_bytes_estimate")
+            downloaded = data.get("downloaded_bytes") or 0
+            if total:
+                events.put(("progress", min(80.0, downloaded / total * 80.0)))
+
+            percent = clean_message(data.get("_percent_str", ""))
+            speed = clean_message(data.get("_speed_str", ""))
+            eta = clean_message(data.get("_eta_str", ""))
+            detail = " ".join(part for part in (percent, speed, f"ETA {eta}" if eta else "") if part)
+            if detail:
+                media_type = "audio" if settings.output_format == "mp3" else "video"
+                events.put(("status", f"Downloading {media_type}... {detail}"))
+        elif status == "finished":
+            events.put(("progress", 85.0))
+            next_step = "Converting to MP3..." if settings.output_format == "mp3" else "Finalizing MP4..."
+            events.put(("status", next_step))
+            filename = data.get("filename")
+            if filename:
+                events.put(("log", f"Downloaded source file: {Path(filename).name}"))
+        elif status == "error":
+            events.put(("status", "Download failed."))
+
+    def postprocessor_hook(data: dict[str, Any]) -> None:
+        status = data.get("status")
+        postprocessor = data.get("postprocessor") or "FFmpeg"
+        if status == "started":
+            events.put(("progress", 90.0))
+            events.put(("status", f"{postprocessor}: converting..."))
+        elif status == "finished":
+            events.put(("progress", 96.0))
+            events.put(("status", f"{postprocessor}: finished."))
+
+    options: dict[str, Any] = {
+        "outtmpl": str(settings.output_dir / "%(title).200B [%(id)s].%(ext)s"),
+        "noplaylist": True,
+        "windowsfilenames": True,
+        "quiet": True,
+        "no_warnings": True,
+        "logger": QueueLogger(events),
+        "progress_hooks": [progress_hook],
+        "postprocessor_hooks": [postprocessor_hook],
+        "ffmpeg_location": ffmpeg_path,
+    }
+
+    if settings.output_format == "mp3":
+        options.update(
+            {
+                "format": "bestaudio/best",
+                "keepvideo": settings.keep_source_audio,
+                "postprocessors": [
+                    {
+                        "key": "FFmpegExtractAudio",
+                        "preferredcodec": "mp3",
+                        "preferredquality": settings.quality_value,
+                    }
+                ],
+            }
+        )
+        return options
+
+    options.update(
+        {
+            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
+            "merge_output_format": "mp4",
+            "postprocessors": [
+                {
+                    "key": "FFmpegVideoRemuxer",
+                    "preferedformat": "mp4",
+                }
+            ],
+        }
+    )
+    return options
+
+
+def locate_output_file(output_dir: Path, started_at: float, suffix: str) -> Path | None:
+    candidates = [
+        path
+        for path in output_dir.glob(f"*.{suffix}")
+        if path.is_file() and path.stat().st_mtime >= started_at - 2
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
+def locate_output_mp3(output_dir: Path, started_at: float) -> Path | None:
+    return locate_output_file(output_dir, started_at, "mp3")
+
+
+def expected_output_path(ydl: Any, info: dict[str, Any], output_format: str) -> Path:
+    requested_downloads = info.get("requested_downloads") or []
+    for download in requested_downloads:
+        filepath = download.get("filepath")
+        if filepath:
+            path = Path(filepath)
+            if path.suffix.lower() == f".{output_format}":
+                return path
+
+    return Path(ydl.prepare_filename(info)).with_suffix(f".{output_format}")
+
+
+def download_media(
+    settings: DownloadSettings,
+    events: "queue.Queue[tuple[str, Any]]",
+) -> None:
+    started_at = time.time()
+    settings.output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        import yt_dlp
+
+        output_label = MEDIA_FORMAT_CHOICES.get(settings.output_format, settings.output_format.upper())
+        events.put(("status", "Preparing download..."))
+        events.put(("log", f"Output format: {output_label}."))
+        if settings.output_format == "mp3":
+            events.put(("log", "Using best available YouTube audio stream."))
+            events.put(("log", f"MP3 quality: {settings.quality_label}"))
+            if settings.keep_source_audio:
+                events.put(("log", "Keeping the original source audio file too."))
+        else:
+            events.put(("log", "Using best available MP4-compatible YouTube video stream."))
+
+        ydl_options = build_ydl_options(settings, events)
+        with yt_dlp.YoutubeDL(ydl_options) as ydl:
+            info = ydl.extract_info(settings.url, download=True)
+            expected_path = expected_output_path(ydl, info, settings.output_format)
+
+        output_path = (
+            expected_path
+            if expected_path.exists()
+            else locate_output_file(settings.output_dir, started_at, settings.output_format)
+        )
+        events.put(("progress", 100.0))
+        if output_path:
+            events.put(("status", f"Done: {output_path.name}"))
+            events.put(("done", output_path))
+        else:
+            events.put(("status", "Done."))
+            events.put(("done", None))
+    except Exception as exc:
+        events.put(("error", clean_message(exc)))
+
+
+def download_audio(
+    settings: DownloadSettings,
+    events: "queue.Queue[tuple[str, Any]]",
+) -> None:
+    download_media(settings, events)

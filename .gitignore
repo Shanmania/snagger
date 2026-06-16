@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+.pytest_cache/
+.codex-test-output/
+
+build/
+dist/
+downloads/
+*.spec
+
+src/*.egg-info/
+src/*/*.egg-info/
