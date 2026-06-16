@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import queue
 import secrets
+import shutil
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -11,7 +13,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from flask import Flask, Response, abort, jsonify, render_template_string, request, send_file
+from flask import Flask, Response, abort, after_this_request, jsonify, render_template_string, request, send_file
 
 from .core import DownloadSettings, MEDIA_FORMAT_CHOICES, QUALITY_CHOICES, default_output_dir, download_media
 
@@ -32,6 +34,8 @@ ALLOWED_YOUTUBE_HOSTS = {
 class DownloadJob:
     id: str
     settings: DownloadSettings
+    save_to_server: bool
+    cleanup_dir: Path | None = None
     events: "queue.Queue[tuple[str, Any]]" = field(default_factory=queue.Queue)
     status: str = "queued"
     progress: float = 0.0
@@ -89,6 +93,7 @@ def create_app() -> Flask:
         output_format = str(payload.get("media_format") or "mp3").strip().lower()
         quality_label = str(payload.get("quality") or "Maximum VBR quality")
         keep_source_audio = output_format == "mp3" and bool(payload.get("keep_source_audio"))
+        save_to_server = bool(payload.get("deploy_to_server"))
 
         if not is_allowed_youtube_url(url):
             return {"error": "Enter a valid YouTube URL."}, 400
@@ -99,15 +104,21 @@ def create_app() -> Flask:
         if quality_label not in QUALITY_CHOICES:
             quality_label = "Maximum VBR quality"
 
+        job_output_dir = output_dir if save_to_server else temporary_output_dir()
         settings = DownloadSettings(
             url=url,
-            output_dir=output_dir,
+            output_dir=job_output_dir,
             quality_label=quality_label,
             quality_value=QUALITY_CHOICES[quality_label],
             keep_source_audio=keep_source_audio,
             output_format=output_format,
         )
-        job = DownloadJob(id=uuid4().hex, settings=settings)
+        job = DownloadJob(
+            id=uuid4().hex,
+            settings=settings,
+            save_to_server=save_to_server,
+            cleanup_dir=None if save_to_server else job_output_dir,
+        )
 
         with jobs_lock:
             jobs[job.id] = job
@@ -129,9 +140,15 @@ def create_app() -> Flask:
             abort(404)
 
         output_path = job.output_path.resolve()
-        output_root = output_dir.resolve()
+        output_root = job.settings.output_dir.resolve()
         if not output_path.is_file() or not output_path.is_relative_to(output_root):
             abort(404)
+
+        if not job.save_to_server:
+            @after_this_request
+            def cleanup_after_download(response: Response) -> Response:
+                cleanup_temporary_job(job)
+                return response
 
         return send_file(output_path, as_attachment=True, download_name=output_path.name)
 
@@ -141,6 +158,17 @@ def create_app() -> Flask:
 def configured_output_dir() -> Path:
     output = os.environ.get("SNAGGER_OUTPUT_DIR")
     return Path(output).expanduser() if output else default_output_dir()
+
+
+def temporary_output_dir() -> Path:
+    return Path(tempfile.mkdtemp(prefix="snagger-"))
+
+
+def cleanup_temporary_job(job: DownloadJob) -> None:
+    if job.cleanup_dir:
+        shutil.rmtree(job.cleanup_dir, ignore_errors=True)
+    with jobs_lock:
+        jobs.pop(job.id, None)
 
 
 def is_allowed_youtube_url(url: str) -> bool:
@@ -202,6 +230,7 @@ def job_payload(job: DownloadJob) -> dict[str, Any]:
         "error": job.error,
         "created_at": job.created_at.isoformat(),
         "media_format": job.settings.output_format,
+        "save_to_server": job.save_to_server,
     }
     if job.status == "done" and job.output_path:
         payload["filename"] = job.output_path.name
@@ -308,7 +337,7 @@ INDEX_HTML = """
 
     .settings-row {
       display: grid;
-      grid-template-columns: 220px minmax(0, 1fr);
+      grid-template-columns: 280px minmax(0, 1fr);
       gap: 12px;
       align-items: end;
     }
@@ -338,14 +367,22 @@ INDEX_HTML = """
     .mode-switch {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 4px;
+      gap: 6px;
       width: 100%;
-      min-height: 42px;
+      min-height: 48px;
       margin: 0;
-      padding: 4px;
+      padding: 5px;
       border: 1px solid var(--line);
-      border-radius: 8px;
+      border-radius: 10px;
       background: #101410;
+    }
+
+    .mode-switch label {
+      display: block;
+      min-width: 0;
+      color: inherit;
+      font-size: 14px;
+      font-weight: 800;
     }
 
     .mode-switch input {
@@ -358,18 +395,30 @@ INDEX_HTML = """
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 32px;
-      border-radius: 6px;
+      width: 100%;
+      min-height: 36px;
+      border: 1px solid transparent;
+      border-radius: 8px;
       color: var(--muted);
+      text-align: center;
       font-weight: 760;
+      letter-spacing: 0.02em;
       cursor: pointer;
       user-select: none;
+      transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+    }
+
+    .mode-switch input:not(:checked) + span:hover {
+      color: var(--ink);
+      background: #171d17;
+      border-color: #3c4739;
     }
 
     .mode-switch input:checked + span {
       color: #071310;
       background: linear-gradient(135deg, var(--accent), #75e08f);
-      box-shadow: 0 8px 18px rgba(35, 199, 167, 0.24);
+      border-color: rgba(206, 255, 225, 0.22);
+      box-shadow: 0 10px 22px rgba(35, 199, 167, 0.26);
     }
 
     .mode-switch input:focus-visible + span {
@@ -392,6 +441,35 @@ INDEX_HTML = """
       gap: 10px;
       align-items: center;
       flex-wrap: wrap;
+    }
+
+    .server-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 9px;
+      min-height: 44px;
+      padding: 0 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      color: var(--muted);
+      background: #101410;
+      font-size: 14px;
+      font-weight: 740;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .server-toggle input {
+      width: 16px;
+      height: 16px;
+      accent-color: var(--accent);
+      cursor: pointer;
+    }
+
+    .server-toggle:has(input:checked) {
+      color: var(--ink);
+      border-color: rgba(35, 199, 167, 0.52);
+      background: rgba(35, 199, 167, 0.1);
     }
 
     button, .download {
@@ -595,6 +673,10 @@ INDEX_HTML = """
 
           <div class="actions">
             <button id="submitButton" type="submit">Snag MP3</button>
+            <label class="server-toggle" title="Also save the finished file to the server downloads folder.">
+              <input id="deployToServer" name="deployToServer" type="checkbox">
+              <span>Deploy to server</span>
+            </label>
             <span class="error" id="errorText" hidden></span>
           </div>
         </form>
@@ -618,7 +700,7 @@ INDEX_HTML = """
 
       <aside class="panel side">
         <h2>Server Notes</h2>
-        <p>Downloads are saved on the server and returned from this page. Put this behind auth or a private network when it is reachable from the internet.</p>
+        <p>Files are sent to your browser by default. Check Deploy to server to also save the finished file in the mounted downloads folder.</p>
       </aside>
     </div>
   </main>
@@ -656,7 +738,8 @@ INDEX_HTML = """
         url: form.url.value,
         media_format: currentMediaFormat(),
         quality: form.quality.value,
-        keep_source_audio: currentMediaFormat() === "mp3" && form.keepSource.checked
+        keep_source_audio: currentMediaFormat() === "mp3" && form.keepSource.checked,
+        deploy_to_server: form.deployToServer.checked
       };
 
       try {

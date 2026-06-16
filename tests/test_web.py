@@ -40,6 +40,7 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('role="radiogroup"', html)
         self.assertIn('name="media_format" value="mp3"', html)
         self.assertIn('name="media_format" value="mp4"', html)
+        self.assertIn('name="deployToServer"', html)
 
     def test_rejects_unknown_media_format(self) -> None:
         response = self.client.post(
@@ -54,10 +55,14 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("error", response.get_json())
 
     def test_job_completes_and_serves_download(self) -> None:
+        captured_output: dict[str, Path] = {}
+
         def fake_download(settings, events):
             self.assertEqual(settings.output_format, "mp3")
+            self.assertNotEqual(Path(settings.output_dir).resolve(), Path(self.tempdir.name).resolve())
             output_path = Path(settings.output_dir) / "sample.mp3"
             output_path.write_bytes(b"mp3")
+            captured_output["path"] = output_path
             events.put(("status", "Done: sample.mp3"))
             events.put(("progress", 100.0))
             events.put(("log", "Saved MP3: sample.mp3"))
@@ -83,11 +88,56 @@ class WebAppTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["filename"], "sample.mp3")
+        self.assertFalse(payload["save_to_server"])
 
         download_response = self.client.get(payload["download_url"])
         self.assertEqual(download_response.status_code, 200)
         self.assertEqual(download_response.data, b"mp3")
         download_response.close()
+        self.assertFalse(captured_output["path"].exists())
+
+    def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
+        captured_output: dict[str, Path] = {}
+
+        def fake_download(settings, events):
+            self.assertEqual(Path(settings.output_dir).resolve(), Path(self.tempdir.name).resolve())
+            output_path = Path(settings.output_dir) / "server-sample.mp3"
+            output_path.write_bytes(b"mp3")
+            captured_output["path"] = output_path
+            events.put(("status", "Done: server-sample.mp3"))
+            events.put(("progress", 100.0))
+            events.put(("log", "Saved MP3: server-sample.mp3"))
+            events.put(("done", output_path))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={
+                    "url": "https://www.youtube.com/watch?v=qp1kjzd7uug",
+                    "deploy_to_server": True,
+                },
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["status"], "done")
+        self.assertTrue(payload["save_to_server"])
+
+        download_response = self.client.get(payload["download_url"])
+        self.assertEqual(download_response.status_code, 200)
+        self.assertEqual(download_response.data, b"mp3")
+        download_response.close()
+        self.assertTrue(captured_output["path"].exists())
 
     def test_mp4_job_completes_and_serves_download(self) -> None:
         def fake_download(settings, events):

@@ -36,6 +36,9 @@ Downloads are saved on the host in:
 /mnt/tang/media/downloads
 ```
 
+Snagger sends files to the browser by default. Check "Deploy to server" in the
+web app when you also want the finished MP3 or MP4 saved to that host folder.
+
 To use a different host folder for downloads:
 
 ```bash
