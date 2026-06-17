@@ -38,6 +38,10 @@ Downloads are saved on the host in:
 
 Snagger sends files to the browser by default. Check "Deploy to server" in the
 web app when you also want the finished MP3 or MP4 saved to that host folder.
+When MP3 mode sees a YouTube playlist URL, Snagger shows a playlist option and
+downloads each playlist item as a separate MP3. Browser-only playlist jobs are
+returned as one zip file; server-deployed playlist jobs also leave the separate
+MP3 files in the mounted downloads folder.
 
 To use a different host folder for downloads:
 

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import secrets
 import shutil
 import tempfile
 import threading
+import zipfile
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
 from flask import Flask, Response, abort, after_this_request, jsonify, render_template_string, request, send_file
@@ -42,6 +44,8 @@ class DownloadJob:
     message: str = "Queued."
     log: list[str] = field(default_factory=list)
     output_path: Path | None = None
+    output_paths: list[Path] = field(default_factory=list)
+    archive_path: Path | None = None
     error: str | None = None
     created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
@@ -94,6 +98,11 @@ def create_app() -> Flask:
         quality_label = str(payload.get("quality") or "Maximum VBR quality")
         keep_source_audio = output_format == "mp3" and bool(payload.get("keep_source_audio"))
         save_to_server = bool(payload.get("deploy_to_server"))
+        download_playlist = (
+            output_format == "mp3"
+            and is_youtube_playlist_url(url)
+            and payload.get("download_playlist", True) is not False
+        )
 
         if not is_allowed_youtube_url(url):
             return {"error": "Enter a valid YouTube URL."}, 400
@@ -112,6 +121,7 @@ def create_app() -> Flask:
             quality_value=QUALITY_CHOICES[quality_label],
             keep_source_audio=keep_source_audio,
             output_format=output_format,
+            allow_playlist=download_playlist,
         )
         job = DownloadJob(
             id=uuid4().hex,
@@ -178,6 +188,15 @@ def is_allowed_youtube_url(url: str) -> bool:
     return (parsed.hostname or "").lower() in ALLOWED_YOUTUBE_HOSTS
 
 
+def is_youtube_playlist_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if not (parsed.scheme in {"http", "https"} and (parsed.hostname or "").lower() in ALLOWED_YOUTUBE_HOSTS):
+        return False
+
+    query = parse_qs(parsed.query)
+    return bool(query.get("list")) or parsed.path.rstrip("/") == "/playlist"
+
+
 def find_job(job_id: str) -> DownloadJob:
     with jobs_lock:
         job = jobs.get(job_id)
@@ -208,7 +227,22 @@ def drain_events(job: DownloadJob) -> None:
             job.log.append(str(value))
             job.log = job.log[-200:]
         elif event == "done":
-            job.output_path = value if isinstance(value, Path) else None
+            job.output_paths = normalize_output_paths(value)
+            job.archive_path = None
+            if len(job.output_paths) > 1 or (job.settings.allow_playlist and job.output_paths):
+                try:
+                    job.archive_path = create_archive(job.settings.output_dir, job.output_paths)
+                    job.output_path = job.archive_path
+                    job.log.append(f"Created browser download bundle: {job.archive_path.name}")
+                except OSError as exc:
+                    job.error = str(exc)
+                    job.status = "error"
+                    job.message = "Failed."
+                    job.progress = 0.0
+                    job.log.append(str(exc))
+                    continue
+            else:
+                job.output_path = job.output_paths[0] if job.output_paths else None
             job.status = "done"
             job.progress = 100.0
         elif event == "error":
@@ -217,6 +251,50 @@ def drain_events(job: DownloadJob) -> None:
             job.message = "Failed."
             job.progress = 0.0
             job.log.append(str(value))
+
+
+def normalize_output_paths(value: Any) -> list[Path]:
+    if isinstance(value, Path):
+        return [value]
+    if isinstance(value, list):
+        return [path for path in value if isinstance(path, Path)]
+    return []
+
+
+def create_archive(output_dir: Path, output_paths: list[Path]) -> Path:
+    output_root = output_dir.resolve()
+    archive_path = unique_path(output_root / f"{archive_stem(output_root, output_paths)}.zip")
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
+        for path in output_paths:
+            resolved_path = path.resolve()
+            if not resolved_path.is_file() or not resolved_path.is_relative_to(output_root):
+                continue
+            archive.write(resolved_path, resolved_path.relative_to(output_root))
+    return archive_path
+
+
+def archive_stem(output_root: Path, output_paths: list[Path]) -> str:
+    parents = [path.resolve().parent for path in output_paths]
+    common_parent = Path(os.path.commonpath([str(parent) for parent in parents])) if parents else output_root
+    if common_parent != output_root:
+        name = common_parent.name
+    else:
+        name = "snagger-playlist"
+    return sanitize_filename(name)
+
+
+def sanitize_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", value).strip(" ._")
+    return cleaned[:120] or "snagger-playlist"
+
+
+def unique_path(path: Path) -> Path:
+    candidate = path
+    counter = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}-{counter}{path.suffix}")
+        counter += 1
+    return candidate
 
 
 def job_payload(job: DownloadJob) -> dict[str, Any]:
@@ -231,10 +309,13 @@ def job_payload(job: DownloadJob) -> dict[str, Any]:
         "created_at": job.created_at.isoformat(),
         "media_format": job.settings.output_format,
         "save_to_server": job.save_to_server,
+        "playlist_download": job.settings.allow_playlist,
+        "files_count": len(job.output_paths),
     }
     if job.status == "done" and job.output_path:
         payload["filename"] = job.output_path.name
         payload["download_url"] = f"/downloads/{job.id}"
+        payload["download_label"] = "ZIP" if job.archive_path else job.settings.output_format.upper()
     return payload
 
 
@@ -434,6 +515,10 @@ INDEX_HTML = """
       margin: 0 0 12px;
       color: var(--muted);
       font-size: 14px;
+    }
+
+    .playlist-row {
+      color: #cfeee6;
     }
 
     .actions {
@@ -671,6 +756,11 @@ INDEX_HTML = """
             <span>Keep original source audio too</span>
           </label>
 
+          <label class="inline playlist-row" id="playlistRow" hidden>
+            <input id="downloadPlaylist" name="downloadPlaylist" type="checkbox">
+            <span>Download playlist as separate MP3s</span>
+          </label>
+
           <div class="actions">
             <button id="submitButton" type="submit">Snag MP3</button>
             <label class="server-toggle" title="Also save the finished file to the server downloads folder.">
@@ -707,9 +797,12 @@ INDEX_HTML = """
 
   <script>
     const form = document.querySelector("#convertForm");
+    const urlInput = document.querySelector("#url");
     const mediaFormatInputs = Array.from(document.querySelectorAll('input[name="media_format"]'));
     const qualityField = document.querySelector("#qualityField");
     const keepSourceRow = document.querySelector("#keepSourceRow");
+    const playlistRow = document.querySelector("#playlistRow");
+    const downloadPlaylist = document.querySelector("#downloadPlaylist");
     const appState = document.querySelector("#appState");
     const submitButton = document.querySelector("#submitButton");
     const errorText = document.querySelector("#errorText");
@@ -722,8 +815,13 @@ INDEX_HTML = """
     const downloadLink = document.querySelector("#downloadLink");
 
     let pollTimer = null;
+    let playlistChoiceTouched = false;
 
     mediaFormatInputs.forEach((input) => input.addEventListener("change", syncFormatControls));
+    urlInput.addEventListener("input", syncPlaylistControls);
+    downloadPlaylist.addEventListener("change", () => {
+      playlistChoiceTouched = true;
+    });
     syncFormatControls();
 
     form.addEventListener("submit", async (event) => {
@@ -739,7 +837,8 @@ INDEX_HTML = """
         media_format: currentMediaFormat(),
         quality: form.quality.value,
         keep_source_audio: currentMediaFormat() === "mp3" && form.keepSource.checked,
-        deploy_to_server: form.deployToServer.checked
+        deploy_to_server: form.deployToServer.checked,
+        download_playlist: currentMediaFormat() === "mp3" && form.downloadPlaylist.checked
       };
 
       try {
@@ -793,8 +892,11 @@ INDEX_HTML = """
       log.scrollTop = log.scrollHeight;
 
       if (job.status === "done" && job.download_url) {
-        const label = (job.media_format || "file").toUpperCase();
-        filename.textContent = job.filename || `${label} ready`;
+        const label = job.download_label || (job.media_format || "file").toUpperCase();
+        const fileCount = Number(job.files_count || 0);
+        filename.textContent = fileCount > 1
+          ? `${fileCount} files bundled as ${job.filename}`
+          : job.filename || `${label} ready`;
         downloadLink.href = job.download_url;
         downloadLink.textContent = `Download ${label}`;
         result.hidden = false;
@@ -830,11 +932,45 @@ INDEX_HTML = """
       qualityField.hidden = !wantsMp3;
       keepSourceRow.hidden = !wantsMp3;
       submitButton.textContent = wantsMp3 ? "Snag MP3" : "Snag MP4";
+      syncPlaylistControls();
     }
 
     function currentMediaFormat() {
       const selected = mediaFormatInputs.find((input) => input.checked);
       return selected ? selected.value : "mp3";
+    }
+
+    function syncPlaylistControls() {
+      const showPlaylistOption = currentMediaFormat() === "mp3" && looksLikePlaylist(urlInput.value);
+      playlistRow.hidden = !showPlaylistOption;
+      if (showPlaylistOption && !playlistChoiceTouched) {
+        downloadPlaylist.checked = true;
+      }
+      if (!showPlaylistOption) {
+        downloadPlaylist.checked = false;
+        playlistChoiceTouched = false;
+      }
+    }
+
+    function looksLikePlaylist(value) {
+      try {
+        const parsed = new URL(value);
+        const host = parsed.hostname.toLowerCase();
+        const youtubeHost = [
+          "youtube.com",
+          "www.youtube.com",
+          "m.youtube.com",
+          "music.youtube.com",
+          "youtube-nocookie.com",
+          "www.youtube-nocookie.com",
+          "youtu.be",
+          "www.youtu.be"
+        ].includes(host);
+        const path = parsed.pathname.endsWith("/") ? parsed.pathname.slice(0, -1) : parsed.pathname;
+        return youtubeHost && (parsed.searchParams.has("list") || path === "/playlist");
+      } catch {
+        return false;
+      }
     }
   </script>
 </body>

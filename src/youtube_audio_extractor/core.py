@@ -33,6 +33,7 @@ class DownloadSettings:
     quality_value: str
     keep_source_audio: bool
     output_format: str = "mp3"
+    allow_playlist: bool = False
 
 
 class QueueLogger:
@@ -126,8 +127,8 @@ def build_ydl_options(
             events.put(("status", f"{postprocessor}: finished."))
 
     options: dict[str, Any] = {
-        "outtmpl": str(settings.output_dir / "%(title).200B [%(id)s].%(ext)s"),
-        "noplaylist": True,
+        "outtmpl": output_template(settings),
+        "noplaylist": not settings.allow_playlist,
         "windowsfilenames": True,
         "quiet": True,
         "no_warnings": True,
@@ -179,20 +180,64 @@ def locate_output_file(output_dir: Path, started_at: float, suffix: str) -> Path
     return max(candidates, key=lambda path: path.stat().st_mtime)
 
 
+def locate_output_files(output_dir: Path, started_at: float, suffix: str) -> list[Path]:
+    return sorted(
+        (
+            path
+            for path in output_dir.rglob(f"*.{suffix}")
+            if path.is_file() and path.stat().st_mtime >= started_at - 2
+        ),
+        key=lambda path: str(path),
+    )
+
+
 def locate_output_mp3(output_dir: Path, started_at: float) -> Path | None:
     return locate_output_file(output_dir, started_at, "mp3")
 
 
-def expected_output_path(ydl: Any, info: dict[str, Any], output_format: str) -> Path:
-    requested_downloads = info.get("requested_downloads") or []
-    for download in requested_downloads:
-        filepath = download.get("filepath")
-        if filepath:
-            path = Path(filepath)
-            if path.suffix.lower() == f".{output_format}":
-                return path
+def output_template(settings: DownloadSettings) -> str:
+    if settings.allow_playlist:
+        return str(
+            settings.output_dir
+            / "%(playlist_title).180B"
+            / "%(playlist_index)03d - %(title).180B [%(id)s].%(ext)s"
+        )
+    return str(settings.output_dir / "%(title).200B [%(id)s].%(ext)s")
 
+
+def iter_download_entries(info: dict[str, Any]) -> list[dict[str, Any]]:
+    if info.get("_type") == "playlist" or info.get("entries"):
+        return [entry for entry in info.get("entries") or [] if isinstance(entry, dict)]
+    return [info]
+
+
+def expected_output_path(ydl: Any, info: dict[str, Any], output_format: str) -> Path:
+    paths = expected_output_paths(ydl, info, output_format)
+    if paths:
+        return paths[0]
     return Path(ydl.prepare_filename(info)).with_suffix(f".{output_format}")
+
+
+def expected_output_paths(ydl: Any, info: dict[str, Any], output_format: str) -> list[Path]:
+    paths: list[Path] = []
+    for entry in iter_download_entries(info):
+        if not entry.get("id"):
+            continue
+
+        requested_downloads = entry.get("requested_downloads") or []
+        matched_output = False
+        for download in requested_downloads:
+            filepath = download.get("filepath")
+            if filepath:
+                path = Path(filepath)
+                if path.suffix.lower() == f".{output_format}":
+                    matched_output = True
+                    paths.append(path)
+
+        if not matched_output:
+            paths.append(Path(ydl.prepare_filename(entry)).with_suffix(f".{output_format}"))
+
+    return paths
 
 
 def download_media(
@@ -211,6 +256,8 @@ def download_media(
         if settings.output_format == "mp3":
             events.put(("log", "Using best available YouTube audio stream."))
             events.put(("log", f"MP3 quality: {settings.quality_label}"))
+            if settings.allow_playlist:
+                events.put(("log", "Playlist mode: downloading each video as a separate MP3."))
             if settings.keep_source_audio:
                 events.put(("log", "Keeping the original source audio file too."))
         else:
@@ -219,17 +266,22 @@ def download_media(
         ydl_options = build_ydl_options(settings, events)
         with yt_dlp.YoutubeDL(ydl_options) as ydl:
             info = ydl.extract_info(settings.url, download=True)
-            expected_path = expected_output_path(ydl, info, settings.output_format)
+            expected_paths = expected_output_paths(ydl, info, settings.output_format)
 
-        output_path = (
-            expected_path
-            if expected_path.exists()
-            else locate_output_file(settings.output_dir, started_at, settings.output_format)
-        )
+        output_paths = [path for path in expected_paths if path.exists()]
+        if not output_paths:
+            output_paths = locate_output_files(settings.output_dir, started_at, settings.output_format)
         events.put(("progress", 100.0))
-        if output_path:
-            events.put(("status", f"Done: {output_path.name}"))
-            events.put(("done", output_path))
+        if settings.allow_playlist:
+            if output_paths:
+                events.put(("status", f"Done: {len(output_paths)} MP3 files"))
+                events.put(("done", output_paths))
+            else:
+                events.put(("status", "Done."))
+                events.put(("done", []))
+        elif output_paths:
+            events.put(("status", f"Done: {output_paths[0].name}"))
+            events.put(("done", output_paths[0]))
         else:
             events.put(("status", "Done."))
             events.put(("done", None))

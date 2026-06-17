@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import io
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,6 +43,7 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('name="media_format" value="mp3"', html)
         self.assertIn('name="media_format" value="mp4"', html)
         self.assertIn('name="deployToServer"', html)
+        self.assertIn('name="downloadPlaylist"', html)
 
     def test_rejects_unknown_media_format(self) -> None:
         response = self.client.post(
@@ -95,6 +98,93 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(download_response.data, b"mp3")
         download_response.close()
         self.assertFalse(captured_output["path"].exists())
+
+    def test_mp3_playlist_bundles_separate_files_as_zip(self) -> None:
+        captured_paths: list[Path] = []
+
+        def fake_download(settings, events):
+            self.assertEqual(settings.output_format, "mp3")
+            self.assertTrue(settings.allow_playlist)
+            playlist_dir = Path(settings.output_dir) / "Test Playlist"
+            playlist_dir.mkdir(parents=True)
+            first_path = playlist_dir / "001 - First [abc].mp3"
+            second_path = playlist_dir / "002 - Second [def].mp3"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            captured_paths.extend([first_path, second_path])
+            events.put(("status", "Done: 2 MP3 files"))
+            events.put(("progress", 100.0))
+            events.put(("log", "Playlist mode: downloading each video as a separate MP3."))
+            events.put(("done", [first_path, second_path]))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={"url": "https://www.youtube.com/playlist?list=PL123"},
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(payload["files_count"], 2)
+        self.assertEqual(payload["download_label"], "ZIP")
+        self.assertEqual(payload["filename"], "Test Playlist.zip")
+        self.assertTrue(payload["playlist_download"])
+
+        download_response = self.client.get(payload["download_url"])
+        self.assertEqual(download_response.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(download_response.data)) as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["Test Playlist/001 - First [abc].mp3", "Test Playlist/002 - Second [def].mp3"],
+            )
+        download_response.close()
+        self.assertFalse(captured_paths[0].exists())
+
+    def test_mp4_playlist_url_does_not_enable_playlist_download(self) -> None:
+        def fake_download(settings, events):
+            self.assertEqual(settings.output_format, "mp4")
+            self.assertFalse(settings.allow_playlist)
+            output_path = Path(settings.output_dir) / "sample.mp4"
+            output_path.write_bytes(b"mp4")
+            events.put(("status", "Done: sample.mp4"))
+            events.put(("progress", 100.0))
+            events.put(("done", output_path))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={
+                    "url": "https://www.youtube.com/watch?v=qp1kjzd7uug&list=PL123",
+                    "media_format": "mp4",
+                    "download_playlist": True,
+                },
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["status"], "done")
+        self.assertFalse(payload["playlist_download"])
 
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}
