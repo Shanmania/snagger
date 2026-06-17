@@ -44,6 +44,56 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('name="media_format" value="mp4"', html)
         self.assertIn('name="deployToServer"', html)
         self.assertIn('name="downloadPlaylist"', html)
+        self.assertIn('href="/favicon.ico"', html)
+        self.assertIn('id="previewPanel"', html)
+
+    def test_serves_favicon(self) -> None:
+        response = self.client.get("/favicon.ico")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.mimetype, "image/vnd.microsoft.icon")
+        self.assertGreater(len(response.data), 0)
+        response.close()
+
+    def test_preview_endpoint_returns_video_metadata(self) -> None:
+        with patch.object(
+            web,
+            "extract_media_preview",
+            return_value={
+                "kind": "video",
+                "title": "Example Video",
+                "thumbnail": "https://img.youtube.com/vi/abc/hqdefault.jpg",
+                "channel": "Example Channel",
+                "duration": "3:21",
+            },
+        ) as fake_preview:
+            response = self.client.get("/api/preview?url=https://www.youtube.com/watch?v=qp1kjzd7uug")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["kind"], "video")
+        self.assertEqual(payload["title"], "Example Video")
+        fake_preview.assert_called_once_with("https://www.youtube.com/watch?v=qp1kjzd7uug", allow_playlist=False)
+
+    def test_preview_endpoint_detects_playlist_metadata(self) -> None:
+        with patch.object(
+            web,
+            "extract_media_preview",
+            return_value={
+                "kind": "playlist",
+                "title": "Example Playlist",
+                "thumbnail": "https://img.youtube.com/vi/abc/hqdefault.jpg",
+                "channel": "Example Channel",
+                "count": 42,
+            },
+        ) as fake_preview:
+            response = self.client.get("/api/preview?url=https://www.youtube.com/playlist?list=PL123")
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["kind"], "playlist")
+        self.assertEqual(payload["title"], "Example Playlist")
+        fake_preview.assert_called_once_with("https://www.youtube.com/playlist?list=PL123", allow_playlist=True)
 
     def test_rejects_unknown_media_format(self) -> None:
         response = self.client.post(

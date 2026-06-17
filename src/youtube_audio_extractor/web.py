@@ -15,9 +15,17 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
-from flask import Flask, Response, abort, after_this_request, jsonify, render_template_string, request, send_file
+from flask import Flask, Response, abort, after_this_request, jsonify, render_template_string, request, send_file, send_from_directory
 
-from .core import DownloadSettings, MEDIA_FORMAT_CHOICES, QUALITY_CHOICES, default_output_dir, download_media
+from .core import (
+    DownloadSettings,
+    MEDIA_FORMAT_CHOICES,
+    QUALITY_CHOICES,
+    clean_message,
+    default_output_dir,
+    download_media,
+    extract_media_preview,
+)
 
 
 ALLOWED_YOUTUBE_HOSTS = {
@@ -86,9 +94,24 @@ def create_app() -> Flask:
             quality_choices=list(QUALITY_CHOICES),
         )
 
+    @app.get("/favicon.ico")
+    def favicon() -> Response:
+        return send_from_directory(Path(app.root_path) / "static", "favicon.ico", mimetype="image/vnd.microsoft.icon")
+
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/preview")
+    def preview() -> tuple[dict[str, Any], int] | Response:
+        url = str(request.args.get("url") or "").strip()
+        if not is_allowed_youtube_url(url):
+            return {"error": "Enter a valid YouTube URL."}, 400
+
+        try:
+            return jsonify(extract_media_preview(url, allow_playlist=is_youtube_playlist_url(url)))
+        except RuntimeError as exc:
+            return {"error": clean_message(exc)}, 400
 
     @app.post("/api/jobs")
     def create_job() -> tuple[dict[str, Any], int]:
@@ -329,6 +352,7 @@ INDEX_HTML = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Snagger</title>
+  <link rel="icon" href="/favicon.ico" sizes="any">
   <style>
     :root {
       color-scheme: dark;
@@ -647,6 +671,11 @@ INDEX_HTML = """
       background: var(--panel-strong);
     }
 
+    .side-column {
+      display: grid;
+      gap: 12px;
+    }
+
     .side h2 {
       margin: 0 0 10px;
       font-size: 16px;
@@ -657,6 +686,44 @@ INDEX_HTML = """
       color: var(--muted);
       line-height: 1.4;
       font-size: 14px;
+    }
+
+    .preview-content {
+      display: grid;
+      gap: 10px;
+    }
+
+    .preview-thumb {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #101410;
+    }
+
+    .preview-kicker {
+      margin-bottom: 4px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      text-transform: uppercase;
+    }
+
+    .preview-title {
+      color: var(--ink);
+      font-size: 15px;
+      font-weight: 760;
+      line-height: 1.25;
+      overflow-wrap: anywhere;
+    }
+
+    .preview-detail {
+      margin-top: 6px;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.35;
     }
 
     .log {
@@ -698,7 +765,7 @@ INDEX_HTML = """
         margin-top: 12px;
       }
 
-      .progress-panel, .side {
+      .progress-panel, .side-column {
         margin-top: 12px;
       }
 
@@ -788,9 +855,24 @@ INDEX_HTML = """
         <div class="log" id="log" aria-live="polite"></div>
       </section>
 
-      <aside class="panel side">
-        <h2>Server Notes</h2>
-        <p>Files are sent to your browser by default. Check Deploy to server to also save the finished file in the mounted downloads folder.</p>
+      <aside class="side-column">
+        <div class="panel side">
+          <h2>Server Notes</h2>
+          <p>Files are sent to your browser by default. Check Deploy to server to also save the finished file in the mounted downloads folder.</p>
+        </div>
+
+        <div class="panel side" id="previewPanel" hidden>
+          <h2>Preview</h2>
+          <p id="previewLoading">Looking up URL...</p>
+          <div class="preview-content" id="previewContent" hidden>
+            <img class="preview-thumb" id="previewThumb" alt="">
+            <div>
+              <div class="preview-kicker" id="previewKind">Video</div>
+              <div class="preview-title" id="previewTitle"></div>
+              <div class="preview-detail" id="previewDetail"></div>
+            </div>
+          </div>
+        </div>
       </aside>
     </div>
   </main>
@@ -813,12 +895,25 @@ INDEX_HTML = """
     const result = document.querySelector("#result");
     const filename = document.querySelector("#filename");
     const downloadLink = document.querySelector("#downloadLink");
+    const previewPanel = document.querySelector("#previewPanel");
+    const previewLoading = document.querySelector("#previewLoading");
+    const previewContent = document.querySelector("#previewContent");
+    const previewThumb = document.querySelector("#previewThumb");
+    const previewKind = document.querySelector("#previewKind");
+    const previewTitle = document.querySelector("#previewTitle");
+    const previewDetail = document.querySelector("#previewDetail");
 
     let pollTimer = null;
+    let previewTimer = null;
+    let previewController = null;
+    let previewRequestId = 0;
     let playlistChoiceTouched = false;
 
     mediaFormatInputs.forEach((input) => input.addEventListener("change", syncFormatControls));
-    urlInput.addEventListener("input", syncPlaylistControls);
+    urlInput.addEventListener("input", () => {
+      syncPlaylistControls();
+      schedulePreview();
+    });
     downloadPlaylist.addEventListener("change", () => {
       playlistChoiceTouched = true;
     });
@@ -933,6 +1028,7 @@ INDEX_HTML = """
       keepSourceRow.hidden = !wantsMp3;
       submitButton.textContent = wantsMp3 ? "Snag MP3" : "Snag MP4";
       syncPlaylistControls();
+      schedulePreview();
     }
 
     function currentMediaFormat() {
@@ -952,6 +1048,91 @@ INDEX_HTML = """
       }
     }
 
+    function schedulePreview() {
+      window.clearTimeout(previewTimer);
+      const value = urlInput.value.trim();
+      if (!looksLikeYouTubeUrl(value)) {
+        clearPreview();
+        return;
+      }
+
+      previewPanel.hidden = false;
+      previewContent.hidden = true;
+      previewLoading.hidden = false;
+      previewLoading.textContent = "Looking up URL...";
+      previewTimer = window.setTimeout(() => fetchPreview(value), 650);
+    }
+
+    async function fetchPreview(value) {
+      const requestId = ++previewRequestId;
+      if (previewController) {
+        previewController.abort();
+      }
+      previewController = new AbortController();
+
+      try {
+        const params = new URLSearchParams({url: value, media_format: currentMediaFormat()});
+        const response = await fetch(`/api/preview?${params.toString()}`, {signal: previewController.signal});
+        const data = await response.json();
+        if (requestId !== previewRequestId) {
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(data.error || "Could not preview this URL.");
+        }
+        renderPreview(data);
+      } catch (error) {
+        if (error.name === "AbortError" || requestId !== previewRequestId) {
+          return;
+        }
+        previewPanel.hidden = false;
+        previewContent.hidden = true;
+        previewLoading.hidden = false;
+        previewLoading.textContent = "Preview unavailable.";
+      }
+    }
+
+    function renderPreview(preview) {
+      previewPanel.hidden = false;
+      previewLoading.hidden = true;
+      previewContent.hidden = false;
+      previewKind.textContent = preview.kind === "playlist" ? "Playlist" : "Video";
+      previewTitle.textContent = preview.title || "Untitled";
+      const parts = [];
+      if (preview.channel) {
+        parts.push(preview.channel);
+      }
+      if (preview.kind === "playlist" && preview.count) {
+        parts.push(`${preview.count} videos`);
+      }
+      if (preview.kind === "video" && preview.duration) {
+        parts.push(preview.duration);
+      }
+      previewDetail.textContent = parts.join(" / ");
+      if (preview.thumbnail) {
+        previewThumb.src = preview.thumbnail;
+        previewThumb.hidden = false;
+      } else {
+        previewThumb.removeAttribute("src");
+        previewThumb.hidden = true;
+      }
+    }
+
+    function clearPreview() {
+      window.clearTimeout(previewTimer);
+      ++previewRequestId;
+      if (previewController) {
+        previewController.abort();
+      }
+      previewPanel.hidden = true;
+      previewContent.hidden = true;
+      previewLoading.hidden = false;
+      previewLoading.textContent = "Looking up URL...";
+      previewThumb.removeAttribute("src");
+      previewTitle.textContent = "";
+      previewDetail.textContent = "";
+    }
+
     function looksLikePlaylist(value) {
       try {
         const parsed = new URL(value);
@@ -968,6 +1149,24 @@ INDEX_HTML = """
         ].includes(host);
         const path = parsed.pathname.endsWith("/") ? parsed.pathname.slice(0, -1) : parsed.pathname;
         return youtubeHost && (parsed.searchParams.has("list") || path === "/playlist");
+      } catch {
+        return false;
+      }
+    }
+
+    function looksLikeYouTubeUrl(value) {
+      try {
+        const parsed = new URL(value);
+        return [
+          "youtube.com",
+          "www.youtube.com",
+          "m.youtube.com",
+          "music.youtube.com",
+          "youtube-nocookie.com",
+          "www.youtube-nocookie.com",
+          "youtu.be",
+          "www.youtu.be"
+        ].includes(parsed.hostname.toLowerCase());
       } catch {
         return false;
       }

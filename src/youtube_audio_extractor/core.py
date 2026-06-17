@@ -59,6 +59,80 @@ def clean_message(value: object) -> str:
     return ANSI_RE.sub("", str(value)).strip()
 
 
+def format_duration(seconds: object) -> str | None:
+    if not isinstance(seconds, (int, float)) or seconds <= 0:
+        return None
+
+    total_seconds = int(seconds)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def best_thumbnail(info: dict[str, Any]) -> str | None:
+    thumbnail = info.get("thumbnail")
+    if isinstance(thumbnail, str) and thumbnail:
+        return thumbnail
+
+    thumbnails = [item for item in info.get("thumbnails") or [] if isinstance(item, dict) and item.get("url")]
+    if not thumbnails:
+        video_id = info.get("id")
+        if isinstance(video_id, str) and re.fullmatch(r"[A-Za-z0-9_-]{6,}", video_id):
+            return f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+        return None
+
+    def thumbnail_size(item: dict[str, Any]) -> int:
+        return int(item.get("width") or 0) * int(item.get("height") or 0)
+
+    return str(max(thumbnails, key=thumbnail_size)["url"])
+
+
+def extract_media_preview(url: str, allow_playlist: bool) -> dict[str, Any]:
+    try:
+        import yt_dlp
+
+        options: dict[str, Any] = {
+            "quiet": True,
+            "no_warnings": True,
+            "skip_download": True,
+            "noplaylist": not allow_playlist,
+        }
+        if allow_playlist:
+            options["extract_flat"] = "in_playlist"
+
+        with yt_dlp.YoutubeDL(options) as ydl:
+            info = ydl.extract_info(url, download=False)
+
+        if not isinstance(info, dict):
+            raise RuntimeError("Could not read this URL.")
+
+        entries = [entry for entry in info.get("entries") or [] if isinstance(entry, dict)]
+        if allow_playlist and (info.get("_type") == "playlist" or entries):
+            thumbnail = best_thumbnail(info)
+            if not thumbnail and entries:
+                thumbnail = best_thumbnail(entries[0])
+
+            return {
+                "kind": "playlist",
+                "title": info.get("title") or info.get("playlist_title") or "Untitled playlist",
+                "thumbnail": thumbnail,
+                "channel": info.get("channel") or info.get("uploader"),
+                "count": info.get("playlist_count") or len(entries) or None,
+            }
+
+        return {
+            "kind": "video",
+            "title": info.get("title") or "Untitled video",
+            "thumbnail": best_thumbnail(info),
+            "channel": info.get("channel") or info.get("uploader"),
+            "duration": format_duration(info.get("duration")),
+        }
+    except Exception as exc:
+        raise RuntimeError(clean_message(exc)) from exc
+
+
 def default_output_dir() -> Path:
     downloads = Path.home() / "Downloads"
     return downloads if downloads.exists() else Path.cwd()
