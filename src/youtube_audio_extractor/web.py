@@ -96,7 +96,14 @@ def create_app() -> Flask:
 
     @app.get("/favicon.ico")
     def favicon() -> Response:
-        return send_from_directory(Path(app.root_path) / "static", "favicon.ico", mimetype="image/vnd.microsoft.icon")
+        response = send_from_directory(
+            Path(app.root_path) / "static",
+            "favicon.ico",
+            mimetype="image/vnd.microsoft.icon",
+        )
+        response.cache_control.no_cache = True
+        response.cache_control.max_age = 0
+        return response
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -270,7 +277,8 @@ def drain_events(job: DownloadJob) -> None:
                     continue
             elif job.save_to_server and len(job.output_paths) > 1:
                 job.output_path = None
-                job.log.append(f"Saved {len(job.output_paths)} files to the server folder without creating a zip.")
+                job.message = server_saved_message(job)
+                job.log.append(job.message)
             else:
                 job.output_path = job.output_paths[0] if job.output_paths else None
             job.status = "done"
@@ -325,6 +333,12 @@ def unique_path(path: Path) -> Path:
     return candidate
 
 
+def server_saved_message(job: DownloadJob) -> str:
+    file_label = "file" if len(job.output_paths) == 1 else "files"
+    folder = output_group_name(job.settings.output_dir.resolve(), job.output_paths)
+    return f"Saved {len(job.output_paths)} {file_label} to server folder: {folder}"
+
+
 def job_payload(job: DownloadJob) -> dict[str, Any]:
     drain_events(job)
     payload: dict[str, Any] = {
@@ -345,9 +359,8 @@ def job_payload(job: DownloadJob) -> dict[str, Any]:
         payload["download_url"] = f"/downloads/{job.id}"
         payload["download_label"] = "ZIP" if job.archive_path else job.settings.output_format.upper()
     elif job.status == "done" and job.save_to_server and job.output_paths:
-        file_label = "file" if len(job.output_paths) == 1 else "files"
         folder = output_group_name(job.settings.output_dir.resolve(), job.output_paths)
-        payload["server_result"] = f"Saved {len(job.output_paths)} {file_label} to server folder: {folder}"
+        payload["server_result"] = server_saved_message(job)
         payload["server_folder"] = folder
     return payload
 
@@ -362,7 +375,8 @@ INDEX_HTML = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Snagger</title>
-  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon.ico?v=2" sizes="any" type="image/x-icon">
+  <link rel="shortcut icon" href="/favicon.ico?v=2" type="image/x-icon">
   <style>
     :root {
       color-scheme: dark;
@@ -830,7 +844,7 @@ INDEX_HTML = """
 
           <label class="inline" id="keepSourceRow">
             <input id="keepSource" name="keepSource" type="checkbox">
-            <span>Keep original source audio too</span>
+            <span>Keep original source audio</span>
           </label>
 
           <label class="inline playlist-row" id="playlistRow" hidden>

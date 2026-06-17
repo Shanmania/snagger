@@ -104,7 +104,7 @@ class AudioExtractorApp(tk.Tk):
 
         ttk.Checkbutton(
             form,
-            text="Keep original source audio too",
+            text="Keep original source audio",
             variable=self.keep_source_var,
         ).grid(row=4, column=1, sticky="w", pady=(6, 0))
 

@@ -8,7 +8,7 @@ Use this only for videos you own, videos in the public domain, or videos where y
 
 YouTube generally serves audio as Opus or AAC, not MP3. MP3 is a lossy format, so a literally lossless MP3 is not possible when the source is YouTube audio. This app downloads the best available audio stream and converts it with FFmpeg at the highest MP3 VBR setting by default.
 
-For no-extra-loss archiving, enable "Keep original source audio too" so the app saves the original YouTube audio file alongside the MP3.
+For no-extra-loss archiving, enable "Keep original source audio" so the app saves the original YouTube audio file alongside the MP3.
 
 For MP4 output, Snagger asks yt-dlp for MP4-compatible video/audio first and uses FFmpeg to merge or remux the final file when needed.
 

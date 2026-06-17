@@ -89,6 +89,45 @@ def best_thumbnail(info: dict[str, Any]) -> str | None:
     return str(max(thumbnails, key=thumbnail_size)["url"])
 
 
+def as_positive_int(value: object) -> int | None:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number > 0 else None
+
+
+def playlist_position(data: dict[str, Any]) -> tuple[int, int] | None:
+    info = data.get("info_dict") if isinstance(data.get("info_dict"), dict) else {}
+    index = as_positive_int(data.get("playlist_index") or info.get("playlist_index"))
+    count = as_positive_int(
+        data.get("playlist_count")
+        or data.get("n_entries")
+        or info.get("playlist_count")
+        or info.get("n_entries")
+    )
+    if not index or not count:
+        return None
+    return min(index, count), count
+
+
+def playlist_status_suffix(data: dict[str, Any]) -> str:
+    position = playlist_position(data)
+    if not position:
+        return ""
+    index, count = position
+    return f" {index}/{count}"
+
+
+def aggregate_playlist_progress(data: dict[str, Any], item_fraction: float) -> float | None:
+    position = playlist_position(data)
+    if not position:
+        return None
+    index, count = position
+    clamped_fraction = max(0.0, min(0.98, item_fraction))
+    return min(98.0, ((index - 1) + clamped_fraction) / count * 98.0)
+
+
 def extract_media_preview(url: str, allow_playlist: bool) -> dict[str, Any]:
     try:
         import yt_dlp
@@ -167,11 +206,19 @@ def build_ydl_options(
 
     def progress_hook(data: dict[str, Any]) -> None:
         status = data.get("status")
+        playlist_suffix = playlist_status_suffix(data) if settings.allow_playlist else ""
         if status == "downloading":
             total = data.get("total_bytes") or data.get("total_bytes_estimate")
             downloaded = data.get("downloaded_bytes") or 0
             if total:
-                events.put(("progress", min(80.0, downloaded / total * 80.0)))
+                item_fraction = downloaded / total
+                playlist_progress = (
+                    aggregate_playlist_progress(data, item_fraction * 0.80)
+                    if settings.allow_playlist
+                    else None
+                )
+                progress = playlist_progress if playlist_progress is not None else min(80.0, item_fraction * 80.0)
+                events.put(("progress", progress))
 
             percent = clean_message(data.get("_percent_str", ""))
             speed = clean_message(data.get("_speed_str", ""))
@@ -179,10 +226,16 @@ def build_ydl_options(
             detail = " ".join(part for part in (percent, speed, f"ETA {eta}" if eta else "") if part)
             if detail:
                 media_type = "audio" if settings.output_format == "mp3" else "video"
-                events.put(("status", f"Downloading {media_type}... {detail}"))
+                events.put(("status", f"Downloading {media_type}{playlist_suffix}... {detail}"))
         elif status == "finished":
-            events.put(("progress", 85.0))
-            next_step = "Converting to MP3..." if settings.output_format == "mp3" else "Finalizing MP4..."
+            playlist_progress = (
+                aggregate_playlist_progress(data, 0.85)
+                if settings.allow_playlist
+                else None
+            )
+            events.put(("progress", playlist_progress if playlist_progress is not None else 85.0))
+            next_step = "Converting to MP3" if settings.output_format == "mp3" else "Finalizing MP4"
+            next_step = f"{next_step}{playlist_suffix}..."
             events.put(("status", next_step))
             filename = data.get("filename")
             if filename:
@@ -193,12 +246,23 @@ def build_ydl_options(
     def postprocessor_hook(data: dict[str, Any]) -> None:
         status = data.get("status")
         postprocessor = data.get("postprocessor") or "FFmpeg"
+        playlist_suffix = playlist_status_suffix(data) if settings.allow_playlist else ""
         if status == "started":
-            events.put(("progress", 90.0))
-            events.put(("status", f"{postprocessor}: converting..."))
+            playlist_progress = (
+                aggregate_playlist_progress(data, 0.90)
+                if settings.allow_playlist
+                else None
+            )
+            events.put(("progress", playlist_progress if playlist_progress is not None else 90.0))
+            events.put(("status", f"{postprocessor}: converting{playlist_suffix}..."))
         elif status == "finished":
-            events.put(("progress", 96.0))
-            events.put(("status", f"{postprocessor}: finished."))
+            playlist_progress = (
+                aggregate_playlist_progress(data, 0.98)
+                if settings.allow_playlist
+                else None
+            )
+            events.put(("progress", playlist_progress if playlist_progress is not None else 96.0))
+            events.put(("status", f"{postprocessor}: finished{playlist_suffix}."))
 
     options: dict[str, Any] = {
         "outtmpl": output_template(settings),

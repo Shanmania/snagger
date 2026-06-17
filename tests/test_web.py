@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import queue
 import tempfile
 import time
 import unittest
@@ -8,7 +9,16 @@ import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
-from youtube_audio_extractor import web
+from youtube_audio_extractor import core, web
+
+
+def latest_progress(events: "queue.Queue[tuple[str, object]]") -> float | None:
+    progress = None
+    while not events.empty():
+        event, value = events.get_nowait()
+        if event == "progress":
+            progress = float(value)
+    return progress
 
 
 class WebAppTest(unittest.TestCase):
@@ -44,14 +54,16 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('name="media_format" value="mp4"', html)
         self.assertIn('name="deployToServer"', html)
         self.assertIn('name="downloadPlaylist"', html)
-        self.assertIn('href="/favicon.ico"', html)
+        self.assertIn('href="/favicon.ico?v=2"', html)
         self.assertIn('id="previewPanel"', html)
+        self.assertIn("Keep original source audio</span>", html)
 
     def test_serves_favicon(self) -> None:
         response = self.client.get("/favicon.ico")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.mimetype, "image/vnd.microsoft.icon")
+        self.assertIn("no-cache", response.headers["Cache-Control"])
         self.assertGreater(len(response.data), 0)
         response.close()
 
@@ -277,10 +289,55 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(payload["status"], "done")
         self.assertEqual(payload["files_count"], 2)
         self.assertEqual(payload["server_folder"], "Server Playlist")
+        self.assertEqual(payload["message"], "Saved 2 files to server folder: Server Playlist")
+        self.assertEqual(payload["server_result"], "Saved 2 files to server folder: Server Playlist")
         self.assertNotIn("download_url", payload)
         self.assertFalse((Path(self.tempdir.name) / "Server Playlist.zip").exists())
         self.assertTrue(captured_paths[0].exists())
         self.assertTrue(captured_paths[1].exists())
+
+    def test_playlist_progress_aggregates_across_items(self) -> None:
+        events: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        settings = core.DownloadSettings(
+            url="https://www.youtube.com/playlist?list=PL123",
+            output_dir=Path(self.tempdir.name),
+            quality_label="Maximum VBR quality",
+            quality_value="0",
+            keep_source_audio=False,
+            output_format="mp3",
+            allow_playlist=True,
+        )
+
+        with patch.object(core, "resolve_ffmpeg", return_value="/usr/bin/ffmpeg"):
+            options = core.build_ydl_options(settings, events)
+
+        progress_hook = options["progress_hooks"][0]
+        postprocessor_hook = options["postprocessor_hooks"][0]
+
+        postprocessor_hook(
+            {
+                "status": "finished",
+                "postprocessor": "FFmpeg",
+                "info_dict": {"playlist_index": 1, "playlist_count": 2},
+            }
+        )
+        first_item_done = latest_progress(events)
+
+        progress_hook(
+            {
+                "status": "downloading",
+                "downloaded_bytes": 0,
+                "total_bytes": 100,
+                "_percent_str": "0%",
+                "info_dict": {"playlist_index": 2, "playlist_count": 2},
+            }
+        )
+        second_item_started = latest_progress(events)
+
+        self.assertIsNotNone(first_item_done)
+        self.assertIsNotNone(second_item_started)
+        self.assertGreater(second_item_started, first_item_done)
+        self.assertLess(second_item_started, 100.0)
 
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}
