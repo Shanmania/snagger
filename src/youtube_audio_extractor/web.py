@@ -252,7 +252,11 @@ def drain_events(job: DownloadJob) -> None:
         elif event == "done":
             job.output_paths = normalize_output_paths(value)
             job.archive_path = None
-            if len(job.output_paths) > 1 or (job.settings.allow_playlist and job.output_paths):
+            should_bundle = (
+                not job.save_to_server
+                and (len(job.output_paths) > 1 or (job.settings.allow_playlist and job.output_paths))
+            )
+            if should_bundle:
                 try:
                     job.archive_path = create_archive(job.settings.output_dir, job.output_paths)
                     job.output_path = job.archive_path
@@ -264,6 +268,9 @@ def drain_events(job: DownloadJob) -> None:
                     job.progress = 0.0
                     job.log.append(str(exc))
                     continue
+            elif job.save_to_server and len(job.output_paths) > 1:
+                job.output_path = None
+                job.log.append(f"Saved {len(job.output_paths)} files to the server folder without creating a zip.")
             else:
                 job.output_path = job.output_paths[0] if job.output_paths else None
             job.status = "done"
@@ -286,7 +293,7 @@ def normalize_output_paths(value: Any) -> list[Path]:
 
 def create_archive(output_dir: Path, output_paths: list[Path]) -> Path:
     output_root = output_dir.resolve()
-    archive_path = unique_path(output_root / f"{archive_stem(output_root, output_paths)}.zip")
+    archive_path = unique_path(output_root / f"{sanitize_filename(output_group_name(output_root, output_paths))}.zip")
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
         for path in output_paths:
             resolved_path = path.resolve()
@@ -296,14 +303,12 @@ def create_archive(output_dir: Path, output_paths: list[Path]) -> Path:
     return archive_path
 
 
-def archive_stem(output_root: Path, output_paths: list[Path]) -> str:
+def output_group_name(output_root: Path, output_paths: list[Path]) -> str:
     parents = [path.resolve().parent for path in output_paths]
     common_parent = Path(os.path.commonpath([str(parent) for parent in parents])) if parents else output_root
     if common_parent != output_root:
-        name = common_parent.name
-    else:
-        name = "snagger-playlist"
-    return sanitize_filename(name)
+        return common_parent.name
+    return "snagger-playlist"
 
 
 def sanitize_filename(value: str) -> str:
@@ -339,6 +344,11 @@ def job_payload(job: DownloadJob) -> dict[str, Any]:
         payload["filename"] = job.output_path.name
         payload["download_url"] = f"/downloads/{job.id}"
         payload["download_label"] = "ZIP" if job.archive_path else job.settings.output_format.upper()
+    elif job.status == "done" and job.save_to_server and job.output_paths:
+        file_label = "file" if len(job.output_paths) == 1 else "files"
+        folder = output_group_name(job.settings.output_dir.resolve(), job.output_paths)
+        payload["server_result"] = f"Saved {len(job.output_paths)} {file_label} to server folder: {folder}"
+        payload["server_folder"] = folder
     return payload
 
 
@@ -994,6 +1004,12 @@ INDEX_HTML = """
           : job.filename || `${label} ready`;
         downloadLink.href = job.download_url;
         downloadLink.textContent = `Download ${label}`;
+        downloadLink.hidden = false;
+        result.hidden = false;
+      } else if (job.status === "done" && job.server_result) {
+        filename.textContent = job.server_result;
+        downloadLink.removeAttribute("href");
+        downloadLink.hidden = true;
         result.hidden = false;
       }
 
@@ -1017,6 +1033,7 @@ INDEX_HTML = """
       result.hidden = true;
       filename.textContent = "";
       downloadLink.removeAttribute("href");
+      downloadLink.hidden = false;
       log.textContent = "";
       percent.textContent = "0%";
       bar.style.width = "0%";

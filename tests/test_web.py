@@ -236,6 +236,52 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(payload["status"], "done")
         self.assertFalse(payload["playlist_download"])
 
+    def test_server_deploy_playlist_saves_folder_without_zip(self) -> None:
+        captured_paths: list[Path] = []
+
+        def fake_download(settings, events):
+            self.assertEqual(Path(settings.output_dir).resolve(), Path(self.tempdir.name).resolve())
+            self.assertTrue(settings.allow_playlist)
+            playlist_dir = Path(settings.output_dir) / "Server Playlist"
+            playlist_dir.mkdir(parents=True)
+            first_path = playlist_dir / "001 - First [abc].mp3"
+            second_path = playlist_dir / "002 - Second [def].mp3"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            captured_paths.extend([first_path, second_path])
+            events.put(("status", "Done: 2 MP3 files"))
+            events.put(("progress", 100.0))
+            events.put(("done", [first_path, second_path]))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={
+                    "url": "https://www.youtube.com/playlist?list=PL123",
+                    "deploy_to_server": True,
+                },
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["status"], "done")
+        self.assertEqual(payload["files_count"], 2)
+        self.assertEqual(payload["server_folder"], "Server Playlist")
+        self.assertNotIn("download_url", payload)
+        self.assertFalse((Path(self.tempdir.name) / "Server Playlist.zip").exists())
+        self.assertTrue(captured_paths[0].exists())
+        self.assertTrue(captured_paths[1].exists())
+
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}
 
