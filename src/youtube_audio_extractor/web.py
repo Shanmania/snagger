@@ -115,8 +115,14 @@ def create_app() -> Flask:
         if not is_allowed_youtube_url(url):
             return {"error": "Enter a valid YouTube URL."}, 400
 
+        requested_playlist = request.args.get("download_playlist")
+        if requested_playlist is None:
+            allow_playlist = is_youtube_playlist_url(url) and not is_youtube_linked_video_url(url)
+        else:
+            allow_playlist = requested_playlist.lower() == "true"
+
         try:
-            return jsonify(extract_media_preview(url, allow_playlist=is_youtube_playlist_url(url)))
+            return jsonify(extract_media_preview(url, allow_playlist=allow_playlist))
         except RuntimeError as exc:
             return {"error": clean_message(exc)}, 400
 
@@ -128,11 +134,7 @@ def create_app() -> Flask:
         quality_label = str(payload.get("quality") or "Maximum VBR quality")
         keep_source_audio = output_format == "mp3" and bool(payload.get("keep_source_audio"))
         save_to_server = bool(payload.get("deploy_to_server"))
-        download_playlist = (
-            output_format == "mp3"
-            and is_youtube_playlist_url(url)
-            and payload.get("download_playlist", True) is not False
-        )
+        download_playlist = should_download_playlist(payload, url, output_format)
 
         if not is_allowed_youtube_url(url):
             return {"error": "Enter a valid YouTube URL."}, 400
@@ -180,11 +182,11 @@ def create_app() -> Flask:
             abort(404)
 
         output_path = job.output_path.resolve()
-        output_root = job.settings.output_dir.resolve()
+        output_root = download_root_for_job(job)
         if not output_path.is_file() or not output_path.is_relative_to(output_root):
             abort(404)
 
-        if not job.save_to_server:
+        if job.cleanup_dir:
             @after_this_request
             def cleanup_after_download(response: Response) -> Response:
                 cleanup_temporary_job(job)
@@ -227,6 +229,37 @@ def is_youtube_playlist_url(url: str) -> bool:
     return bool(query.get("list")) or parsed.path.rstrip("/") == "/playlist"
 
 
+def is_youtube_linked_video_url(url: str) -> bool:
+    parsed = urlparse(url)
+    if not (parsed.scheme in {"http", "https"} and (parsed.hostname or "").lower() in ALLOWED_YOUTUBE_HOSTS):
+        return False
+
+    query = parse_qs(parsed.query)
+    if query.get("v"):
+        return True
+
+    host = (parsed.hostname or "").lower()
+    path_parts = [part for part in parsed.path.split("/") if part]
+    if host in {"youtu.be", "www.youtu.be"} and path_parts:
+        return True
+    if len(path_parts) >= 2 and path_parts[0] in {"embed", "live", "shorts"}:
+        return True
+    return False
+
+
+def should_download_playlist(payload: dict[str, Any], url: str, output_format: str) -> bool:
+    if output_format != "mp3" or not is_youtube_playlist_url(url):
+        return False
+
+    if bool(payload.get("linked_video_only")) and is_youtube_linked_video_url(url):
+        return False
+
+    requested = payload.get("download_playlist")
+    if requested is None:
+        return not is_youtube_linked_video_url(url)
+    return bool(requested)
+
+
 def find_job(job_id: str) -> DownloadJob:
     with jobs_lock:
         job = jobs.get(job_id)
@@ -260,13 +293,24 @@ def drain_events(job: DownloadJob) -> None:
             job.output_paths = normalize_output_paths(value)
             job.archive_path = None
             should_bundle = (
-                not job.save_to_server
-                and (len(job.output_paths) > 1 or (job.settings.allow_playlist and job.output_paths))
+                len(job.output_paths) > 1 or (job.settings.allow_playlist and job.output_paths)
             )
             if should_bundle:
                 try:
-                    job.archive_path = create_archive(job.settings.output_dir, job.output_paths)
+                    archive_dir = job.settings.output_dir
+                    if job.save_to_server:
+                        archive_dir = temporary_output_dir()
+                        job.cleanup_dir = archive_dir
+
+                    job.archive_path = create_archive(
+                        output_dir=job.settings.output_dir,
+                        output_paths=job.output_paths,
+                        archive_dir=archive_dir,
+                    )
                     job.output_path = job.archive_path
+                    if job.save_to_server:
+                        job.message = server_saved_message(job)
+                        job.log.append(job.message)
                     job.log.append(f"Created browser download bundle: {job.archive_path.name}")
                 except OSError as exc:
                     job.error = str(exc)
@@ -275,10 +319,6 @@ def drain_events(job: DownloadJob) -> None:
                     job.progress = 0.0
                     job.log.append(str(exc))
                     continue
-            elif job.save_to_server and len(job.output_paths) > 1:
-                job.output_path = None
-                job.message = server_saved_message(job)
-                job.log.append(job.message)
             else:
                 job.output_path = job.output_paths[0] if job.output_paths else None
             job.status = "done"
@@ -299,9 +339,11 @@ def normalize_output_paths(value: Any) -> list[Path]:
     return []
 
 
-def create_archive(output_dir: Path, output_paths: list[Path]) -> Path:
+def create_archive(output_dir: Path, output_paths: list[Path], archive_dir: Path | None = None) -> Path:
     output_root = output_dir.resolve()
-    archive_path = unique_path(output_root / f"{sanitize_filename(output_group_name(output_root, output_paths))}.zip")
+    target_dir = archive_dir.resolve() if archive_dir else output_root
+    target_dir.mkdir(parents=True, exist_ok=True)
+    archive_path = unique_path(target_dir / f"{sanitize_filename(output_group_name(output_root, output_paths))}.zip")
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_STORED, allowZip64=True) as archive:
         for path in output_paths:
             resolved_path = path.resolve()
@@ -333,6 +375,12 @@ def unique_path(path: Path) -> Path:
     return candidate
 
 
+def download_root_for_job(job: DownloadJob) -> Path:
+    if job.archive_path and job.output_path and job.output_path.resolve() == job.archive_path.resolve():
+        return job.archive_path.resolve().parent
+    return job.settings.output_dir.resolve()
+
+
 def server_saved_message(job: DownloadJob) -> str:
     file_label = "file" if len(job.output_paths) == 1 else "files"
     folder = output_group_name(job.settings.output_dir.resolve(), job.output_paths)
@@ -358,6 +406,10 @@ def job_payload(job: DownloadJob) -> dict[str, Any]:
         payload["filename"] = job.output_path.name
         payload["download_url"] = f"/downloads/{job.id}"
         payload["download_label"] = "ZIP" if job.archive_path else job.settings.output_format.upper()
+        if job.save_to_server and job.output_paths:
+            folder = output_group_name(job.settings.output_dir.resolve(), job.output_paths)
+            payload["server_result"] = server_saved_message(job)
+            payload["server_folder"] = folder
     elif job.status == "done" and job.save_to_server and job.output_paths:
         folder = output_group_name(job.settings.output_dir.resolve(), job.output_paths)
         payload["server_result"] = server_saved_message(job)
@@ -847,6 +899,11 @@ INDEX_HTML = """
             <span>Keep original source audio</span>
           </label>
 
+          <label class="inline playlist-row" id="linkedVideoRow" hidden>
+            <input id="linkedVideoOnly" name="linkedVideoOnly" type="checkbox">
+            <span>Download linked video only</span>
+          </label>
+
           <label class="inline playlist-row" id="playlistRow" hidden>
             <input id="downloadPlaylist" name="downloadPlaylist" type="checkbox">
             <span>Download playlist as separate MP3s</span>
@@ -907,6 +964,8 @@ INDEX_HTML = """
     const mediaFormatInputs = Array.from(document.querySelectorAll('input[name="media_format"]'));
     const qualityField = document.querySelector("#qualityField");
     const keepSourceRow = document.querySelector("#keepSourceRow");
+    const linkedVideoRow = document.querySelector("#linkedVideoRow");
+    const linkedVideoOnly = document.querySelector("#linkedVideoOnly");
     const playlistRow = document.querySelector("#playlistRow");
     const downloadPlaylist = document.querySelector("#downloadPlaylist");
     const appState = document.querySelector("#appState");
@@ -932,14 +991,21 @@ INDEX_HTML = """
     let previewController = null;
     let previewRequestId = 0;
     let playlistChoiceTouched = false;
+    let linkedVideoChoiceTouched = false;
 
     mediaFormatInputs.forEach((input) => input.addEventListener("change", syncFormatControls));
     urlInput.addEventListener("input", () => {
       syncPlaylistControls();
       schedulePreview();
     });
+    linkedVideoOnly.addEventListener("change", () => {
+      linkedVideoChoiceTouched = true;
+      syncPlaylistControls();
+      schedulePreview();
+    });
     downloadPlaylist.addEventListener("change", () => {
       playlistChoiceTouched = true;
+      schedulePreview();
     });
     syncFormatControls();
 
@@ -957,7 +1023,8 @@ INDEX_HTML = """
         quality: form.quality.value,
         keep_source_audio: currentMediaFormat() === "mp3" && form.keepSource.checked,
         deploy_to_server: form.deployToServer.checked,
-        download_playlist: currentMediaFormat() === "mp3" && form.downloadPlaylist.checked
+        linked_video_only: currentMediaFormat() === "mp3" && form.linkedVideoOnly.checked,
+        download_playlist: currentMediaFormat() === "mp3" && !form.linkedVideoOnly.checked && form.downloadPlaylist.checked
       };
 
       try {
@@ -1013,9 +1080,12 @@ INDEX_HTML = """
       if (job.status === "done" && job.download_url) {
         const label = job.download_label || (job.media_format || "file").toUpperCase();
         const fileCount = Number(job.files_count || 0);
-        filename.textContent = fileCount > 1
+        const downloadText = fileCount > 1
           ? `${fileCount} files bundled as ${job.filename}`
           : job.filename || `${label} ready`;
+        filename.textContent = job.server_result
+          ? `${job.server_result}. Browser download ready: ${job.filename}`
+          : downloadText;
         downloadLink.href = job.download_url;
         downloadLink.textContent = `Download ${label}`;
         downloadLink.hidden = false;
@@ -1069,9 +1139,26 @@ INDEX_HTML = """
 
     function syncPlaylistControls() {
       const showPlaylistOption = currentMediaFormat() === "mp3" && looksLikePlaylist(urlInput.value);
+      const showLinkedVideoOption = showPlaylistOption && looksLikeLinkedVideo(urlInput.value);
+      linkedVideoRow.hidden = !showLinkedVideoOption;
       playlistRow.hidden = !showPlaylistOption;
-      if (showPlaylistOption && !playlistChoiceTouched) {
+
+      if (showLinkedVideoOption && !linkedVideoChoiceTouched) {
+        linkedVideoOnly.checked = true;
+      }
+      if (!showLinkedVideoOption) {
+        linkedVideoOnly.checked = false;
+        linkedVideoChoiceTouched = false;
+      }
+
+      downloadPlaylist.disabled = linkedVideoOnly.checked;
+      playlistRow.style.opacity = linkedVideoOnly.checked ? "0.55" : "1";
+
+      if (showPlaylistOption && !playlistChoiceTouched && !linkedVideoOnly.checked) {
         downloadPlaylist.checked = true;
+      }
+      if (linkedVideoOnly.checked) {
+        downloadPlaylist.checked = false;
       }
       if (!showPlaylistOption) {
         downloadPlaylist.checked = false;
@@ -1102,7 +1189,11 @@ INDEX_HTML = """
       previewController = new AbortController();
 
       try {
-        const params = new URLSearchParams({url: value, media_format: currentMediaFormat()});
+        const params = new URLSearchParams({
+          url: value,
+          media_format: currentMediaFormat(),
+          download_playlist: String(currentMediaFormat() === "mp3" && !linkedVideoOnly.checked && downloadPlaylist.checked)
+        });
         const response = await fetch(`/api/preview?${params.toString()}`, {signal: previewController.signal});
         const data = await response.json();
         if (requestId !== previewRequestId) {
@@ -1198,6 +1289,23 @@ INDEX_HTML = """
           "youtu.be",
           "www.youtu.be"
         ].includes(parsed.hostname.toLowerCase());
+      } catch {
+        return false;
+      }
+    }
+
+    function looksLikeLinkedVideo(value) {
+      try {
+        const parsed = new URL(value);
+        const host = parsed.hostname.toLowerCase();
+        const pathParts = parsed.pathname.split("/").filter(Boolean);
+        if (parsed.searchParams.has("v")) {
+          return true;
+        }
+        if (["youtu.be", "www.youtu.be"].includes(host) && pathParts.length > 0) {
+          return true;
+        }
+        return pathParts.length >= 2 && ["embed", "live", "shorts"].includes(pathParts[0]);
       } catch {
         return false;
       }

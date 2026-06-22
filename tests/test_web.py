@@ -53,6 +53,7 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('name="media_format" value="mp3"', html)
         self.assertIn('name="media_format" value="mp4"', html)
         self.assertIn('name="deployToServer"', html)
+        self.assertIn('name="linkedVideoOnly"', html)
         self.assertIn('name="downloadPlaylist"', html)
         self.assertIn('href="/favicon.ico?v=2"', html)
         self.assertIn('id="previewPanel"', html)
@@ -106,6 +107,51 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(payload["kind"], "playlist")
         self.assertEqual(payload["title"], "Example Playlist")
         fake_preview.assert_called_once_with("https://www.youtube.com/playlist?list=PL123", allow_playlist=True)
+
+    def test_preview_endpoint_treats_playlist_linked_video_as_video_by_default(self) -> None:
+        with patch.object(
+            web,
+            "extract_media_preview",
+            return_value={
+                "kind": "video",
+                "title": "Linked Video",
+                "thumbnail": "https://img.youtube.com/vi/abc/hqdefault.jpg",
+                "channel": "Example Channel",
+                "duration": "3:21",
+            },
+        ) as fake_preview:
+            response = self.client.get(
+                "/api/preview",
+                query_string={"url": "https://www.youtube.com/watch?v=abc123&list=PL123"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["kind"], "video")
+        fake_preview.assert_called_once_with("https://www.youtube.com/watch?v=abc123&list=PL123", allow_playlist=False)
+
+    def test_preview_endpoint_can_force_full_playlist_for_linked_video(self) -> None:
+        with patch.object(
+            web,
+            "extract_media_preview",
+            return_value={
+                "kind": "playlist",
+                "title": "Example Playlist",
+                "thumbnail": "https://img.youtube.com/vi/abc/hqdefault.jpg",
+                "channel": "Example Channel",
+                "count": 42,
+            },
+        ) as fake_preview:
+            response = self.client.get(
+                "/api/preview",
+                query_string={
+                    "url": "https://www.youtube.com/watch?v=abc123&list=PL123",
+                    "download_playlist": "true",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        fake_preview.assert_called_once_with("https://www.youtube.com/watch?v=abc123&list=PL123", allow_playlist=True)
 
     def test_rejects_unknown_media_format(self) -> None:
         response = self.client.post(
@@ -213,6 +259,143 @@ class WebAppTest(unittest.TestCase):
         download_response.close()
         self.assertFalse(captured_paths[0].exists())
 
+    def test_linked_video_playlist_defaults_to_single_video_download(self) -> None:
+        def fake_download(settings, events):
+            self.assertEqual(settings.output_format, "mp3")
+            self.assertFalse(settings.allow_playlist)
+            output_path = Path(settings.output_dir) / "linked-video.mp3"
+            output_path.write_bytes(b"mp3")
+            events.put(("status", "Done: linked-video.mp3"))
+            events.put(("progress", 100.0))
+            events.put(("done", output_path))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={"url": "https://www.youtube.com/watch?v=abc123&list=PL123"},
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["status"], "done")
+        self.assertFalse(payload["playlist_download"])
+        self.assertEqual(payload["filename"], "linked-video.mp3")
+
+    def test_linked_video_playlist_can_request_full_playlist(self) -> None:
+        def fake_download(settings, events):
+            self.assertEqual(settings.output_format, "mp3")
+            self.assertTrue(settings.allow_playlist)
+            playlist_dir = Path(settings.output_dir) / "Linked Playlist"
+            playlist_dir.mkdir(parents=True)
+            first_path = playlist_dir / "001 - First [abc].mp3"
+            second_path = playlist_dir / "002 - Second [def].mp3"
+            first_path.write_bytes(b"first")
+            second_path.write_bytes(b"second")
+            events.put(("status", "Done: 2 MP3 files"))
+            events.put(("progress", 100.0))
+            events.put(("done", [first_path, second_path]))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={
+                    "url": "https://www.youtube.com/watch?v=abc123&list=PL123",
+                    "linked_video_only": False,
+                    "download_playlist": True,
+                },
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertEqual(payload["status"], "done")
+        self.assertTrue(payload["playlist_download"])
+        self.assertEqual(payload["download_label"], "ZIP")
+
+    def test_linked_video_only_overrides_playlist_flag(self) -> None:
+        def fake_download(settings, events):
+            self.assertFalse(settings.allow_playlist)
+            output_path = Path(settings.output_dir) / "linked-video.mp3"
+            output_path.write_bytes(b"mp3")
+            events.put(("progress", 100.0))
+            events.put(("done", output_path))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={
+                    "url": "https://www.youtube.com/watch?v=abc123&list=PL123",
+                    "linked_video_only": True,
+                    "download_playlist": True,
+                },
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertFalse(payload["playlist_download"])
+
+    def test_linked_video_only_does_not_disable_pure_playlist_url(self) -> None:
+        def fake_download(settings, events):
+            self.assertTrue(settings.allow_playlist)
+            playlist_dir = Path(settings.output_dir) / "Pure Playlist"
+            playlist_dir.mkdir(parents=True)
+            output_path = playlist_dir / "001 - First [abc].mp3"
+            output_path.write_bytes(b"mp3")
+            events.put(("progress", 100.0))
+            events.put(("done", [output_path]))
+
+        with patch.object(web, "download_media", side_effect=fake_download):
+            create_response = self.client.post(
+                "/api/jobs",
+                json={
+                    "url": "https://www.youtube.com/playlist?list=PL123",
+                    "linked_video_only": True,
+                },
+            )
+
+        self.assertEqual(create_response.status_code, 202)
+        job_id = create_response.get_json()["id"]
+
+        payload = None
+        for _ in range(20):
+            poll_response = self.client.get(f"/api/jobs/{job_id}")
+            payload = poll_response.get_json()
+            if payload["status"] == "done":
+                break
+            time.sleep(0.05)
+
+        self.assertIsNotNone(payload)
+        self.assertTrue(payload["playlist_download"])
+
     def test_mp4_playlist_url_does_not_enable_playlist_download(self) -> None:
         def fake_download(settings, events):
             self.assertEqual(settings.output_format, "mp4")
@@ -248,7 +431,7 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(payload["status"], "done")
         self.assertFalse(payload["playlist_download"])
 
-    def test_server_deploy_playlist_saves_folder_without_zip(self) -> None:
+    def test_server_deploy_playlist_saves_folder_and_temp_browser_zip(self) -> None:
         captured_paths: list[Path] = []
 
         def fake_download(settings, events):
@@ -291,8 +474,21 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(payload["server_folder"], "Server Playlist")
         self.assertEqual(payload["message"], "Saved 2 files to server folder: Server Playlist")
         self.assertEqual(payload["server_result"], "Saved 2 files to server folder: Server Playlist")
-        self.assertNotIn("download_url", payload)
+        self.assertEqual(payload["download_label"], "ZIP")
+        self.assertEqual(payload["filename"], "Server Playlist.zip")
+        self.assertIn("download_url", payload)
         self.assertFalse((Path(self.tempdir.name) / "Server Playlist.zip").exists())
+        self.assertTrue(captured_paths[0].exists())
+        self.assertTrue(captured_paths[1].exists())
+
+        download_response = self.client.get(payload["download_url"])
+        self.assertEqual(download_response.status_code, 200)
+        with zipfile.ZipFile(io.BytesIO(download_response.data)) as archive:
+            self.assertEqual(
+                sorted(archive.namelist()),
+                ["Server Playlist/001 - First [abc].mp3", "Server Playlist/002 - Second [def].mp3"],
+            )
+        download_response.close()
         self.assertTrue(captured_paths[0].exists())
         self.assertTrue(captured_paths[1].exists())
 
