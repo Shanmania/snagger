@@ -475,11 +475,54 @@ INDEX_HTML = """
       margin-bottom: 16px;
     }
 
-    h1 {
+    .brand-title {
+      position: relative;
+      display: inline-flex;
+      align-items: center;
+      gap: 11px;
       margin: 0;
       font-size: clamp(28px, 4vw, 38px);
       line-height: 1.08;
       font-weight: 760;
+    }
+
+    .brand-title::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      bottom: -8px;
+      width: 62%;
+      height: 3px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, transparent, var(--accent), var(--accent-warm));
+      opacity: 0.9;
+    }
+
+    .brand-mark {
+      display: inline-grid;
+      place-items: center;
+      width: 42px;
+      height: 42px;
+      border: 1px solid rgba(35, 199, 167, 0.4);
+      border-radius: 12px;
+      background:
+        linear-gradient(135deg, rgba(35, 199, 167, 0.2), rgba(240, 184, 74, 0.08)),
+        #111610;
+      box-shadow: 0 14px 28px rgba(35, 199, 167, 0.14);
+    }
+
+    .brand-mark img {
+      width: 26px;
+      height: 26px;
+      display: block;
+    }
+
+    .brand-word {
+      background: linear-gradient(135deg, #ffffff 18%, #c8fff2 55%, #f0d38d 100%);
+      background-clip: text;
+      -webkit-background-clip: text;
+      color: transparent;
+      -webkit-text-fill-color: transparent;
     }
 
     .status-pill {
@@ -802,17 +845,117 @@ INDEX_HTML = """
       line-height: 1.35;
     }
 
-    .log {
+    .log-shell {
       margin-top: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(35, 199, 167, 0.18);
+      border-radius: 8px;
+      background:
+        linear-gradient(180deg, rgba(35, 199, 167, 0.08), transparent 76px),
+        #070908;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04), var(--shadow);
+    }
+
+    .log-top {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      min-height: 40px;
+      padding: 0 13px;
+      border-bottom: 1px solid rgba(51, 59, 49, 0.78);
+      background: rgba(16, 20, 16, 0.86);
+    }
+
+    .log-title {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: #d7efe8;
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .log-lights {
+      display: inline-flex;
+      gap: 5px;
+    }
+
+    .log-lights span {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 14px rgba(35, 199, 167, 0.5);
+    }
+
+    .log-lights span:nth-child(2) {
+      background: var(--accent-warm);
+      box-shadow: 0 0 14px rgba(240, 184, 74, 0.42);
+    }
+
+    .log-lights span:nth-child(3) {
+      background: #6d7a68;
+      box-shadow: none;
+    }
+
+    .log-count {
+      color: var(--muted);
+      font-size: 12px;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .log {
       min-height: 132px;
       max-height: 240px;
       overflow: auto;
-      padding: 13px;
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      background: #0a0c0a;
+      padding: 10px 12px 12px;
       color: #dbe7d7;
       font: 13px/1.42 Consolas, "SFMono-Regular", monospace;
+    }
+
+    .log-empty {
+      color: #687366;
+    }
+
+    .log-line {
+      display: grid;
+      grid-template-columns: 28px minmax(0, 1fr);
+      gap: 9px;
+      padding: 5px 0;
+      border-bottom: 1px solid rgba(51, 59, 49, 0.32);
+    }
+
+    .log-line:last-child {
+      border-bottom: 0;
+    }
+
+    .log-line::before {
+      content: ">";
+      color: var(--accent);
+      font-weight: 800;
+      text-align: right;
+    }
+
+    .log-line.is-success::before {
+      content: "ok";
+      color: #86e79d;
+    }
+
+    .log-line.is-error::before {
+      content: "!!";
+      color: var(--danger);
+    }
+
+    .log-line.is-bundle::before {
+      content: "zip";
+      color: var(--accent-warm);
+    }
+
+    .log-line span {
+      min-width: 0;
       white-space: pre-wrap;
       overflow-wrap: anywhere;
     }
@@ -853,13 +996,27 @@ INDEX_HTML = """
         align-items: stretch;
         flex-direction: column;
       }
+
+      .brand-mark {
+        width: 36px;
+        height: 36px;
+        border-radius: 10px;
+      }
+
+      .brand-mark img {
+        width: 22px;
+        height: 22px;
+      }
     }
   </style>
 </head>
 <body>
   <main>
     <div class="topbar">
-      <h1>Snagger</h1>
+      <h1 class="brand-title">
+        <span class="brand-mark"><img src="/favicon.ico?v=3" alt="" aria-hidden="true"></span>
+        <span class="brand-word">Snagger</span>
+      </h1>
       <div class="status-pill" id="appState">Ready</div>
     </div>
 
@@ -933,7 +1090,18 @@ INDEX_HTML = """
           </div>
         </div>
 
-        <div class="log" id="log" aria-live="polite"></div>
+        <div class="log-shell">
+          <div class="log-top">
+            <div class="log-title">
+              <span class="log-lights" aria-hidden="true"><span></span><span></span><span></span></span>
+              <span>Activity</span>
+            </div>
+            <span class="log-count" id="logCount">0 entries</span>
+          </div>
+          <div class="log" id="log" aria-live="polite">
+            <div class="log-empty">Idle.</div>
+          </div>
+        </div>
       </section>
 
       <aside class="side-column">
@@ -975,6 +1143,7 @@ INDEX_HTML = """
     const percent = document.querySelector("#percent");
     const bar = document.querySelector("#bar");
     const log = document.querySelector("#log");
+    const logCount = document.querySelector("#logCount");
     const result = document.querySelector("#result");
     const filename = document.querySelector("#filename");
     const downloadLink = document.querySelector("#downloadLink");
@@ -1074,8 +1243,7 @@ INDEX_HTML = """
       const value = Number(job.progress || 0);
       percent.textContent = `${Math.round(value)}%`;
       bar.style.width = `${Math.max(0, Math.min(100, value))}%`;
-      log.textContent = (job.log || []).join("\\n");
-      log.scrollTop = log.scrollHeight;
+      renderLog(job.log || []);
 
       if (job.status === "done" && job.download_url) {
         const label = job.download_label || (job.media_format || "file").toUpperCase();
@@ -1118,9 +1286,45 @@ INDEX_HTML = """
       filename.textContent = "";
       downloadLink.removeAttribute("href");
       downloadLink.hidden = false;
-      log.textContent = "";
+      renderLog([]);
       percent.textContent = "0%";
       bar.style.width = "0%";
+    }
+
+    function renderLog(lines) {
+      log.replaceChildren();
+      logCount.textContent = `${lines.length} ${lines.length === 1 ? "entry" : "entries"}`;
+      if (!lines.length) {
+        const empty = document.createElement("div");
+        empty.className = "log-empty";
+        empty.textContent = "Idle.";
+        log.append(empty);
+        return;
+      }
+
+      for (const line of lines) {
+        const item = document.createElement("div");
+        item.className = `log-line ${logLineClass(line)}`;
+        const text = document.createElement("span");
+        text.textContent = line;
+        item.append(text);
+        log.append(item);
+      }
+      log.scrollTop = log.scrollHeight;
+    }
+
+    function logLineClass(line) {
+      const text = String(line).toLowerCase();
+      if (text.includes("error") || text.includes("failed") || text.includes("unable")) {
+        return "is-error";
+      }
+      if (text.includes("browser download bundle") || text.includes(".zip")) {
+        return "is-bundle";
+      }
+      if (text.includes("done") || text.includes("saved") || text.includes("complete")) {
+        return "is-success";
+      }
+      return "";
     }
 
     function syncFormatControls() {
