@@ -427,8 +427,8 @@ INDEX_HTML = """
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Snagger</title>
-  <link rel="icon" href="/favicon.ico?v=2" sizes="any" type="image/x-icon">
-  <link rel="shortcut icon" href="/favicon.ico?v=2" type="image/x-icon">
+  <link rel="icon" href="/favicon.ico?v=3" sizes="any" type="image/x-icon">
+  <link rel="shortcut icon" href="/favicon.ico?v=3" type="image/x-icon">
   <style>
     :root {
       color-scheme: dark;

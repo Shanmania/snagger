@@ -55,7 +55,7 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('name="deployToServer"', html)
         self.assertIn('name="linkedVideoOnly"', html)
         self.assertIn('name="downloadPlaylist"', html)
-        self.assertIn('href="/favicon.ico?v=2"', html)
+        self.assertIn('href="/favicon.ico?v=3"', html)
         self.assertIn('id="previewPanel"', html)
         self.assertIn("Keep original source audio</span>", html)
 
