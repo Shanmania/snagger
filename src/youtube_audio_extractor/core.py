@@ -21,6 +21,13 @@ MEDIA_FORMAT_CHOICES = {
     "mp4": "MP4 video",
 }
 
+PREMIERE_SAFE_MP4_FORMAT = (
+    "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a][acodec^=mp4a]/"
+    "bestvideo[ext=mp4][vcodec^=avc1]+bestaudio[ext=m4a]/"
+    "best[ext=mp4][vcodec^=avc1][acodec^=mp4a]/"
+    "best[ext=mp4][vcodec^=avc1]"
+)
+
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -294,7 +301,7 @@ def build_ydl_options(
 
     options.update(
         {
-            "format": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/bestvideo+bestaudio/best",
+            "format": PREMIERE_SAFE_MP4_FORMAT,
             "merge_output_format": "mp4",
             "postprocessors": [
                 {
@@ -399,7 +406,7 @@ def download_media(
             if settings.keep_source_audio:
                 events.put(("log", "Keeping the original source audio file too."))
         else:
-            events.put(("log", "Using best available MP4-compatible YouTube video stream."))
+            events.put(("log", "Using Premiere-friendly MP4 video: H.264 video with AAC audio."))
 
         ydl_options = build_ydl_options(settings, events)
         with yt_dlp.YoutubeDL(ydl_options) as ydl:

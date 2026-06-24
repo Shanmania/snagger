@@ -538,6 +538,27 @@ class WebAppTest(unittest.TestCase):
         self.assertGreater(second_item_started, first_item_done)
         self.assertLess(second_item_started, 100.0)
 
+    def test_mp4_options_prefer_h264_aac_for_premiere(self) -> None:
+        events: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        settings = core.DownloadSettings(
+            url="https://www.youtube.com/watch?v=qp1kjzd7uug",
+            output_dir=Path(self.tempdir.name),
+            quality_label="Maximum VBR quality",
+            quality_value="0",
+            keep_source_audio=False,
+            output_format="mp4",
+            allow_playlist=False,
+        )
+
+        with patch.object(core, "resolve_ffmpeg", return_value="/usr/bin/ffmpeg"):
+            options = core.build_ydl_options(settings, events)
+
+        self.assertEqual(options["format"], core.PREMIERE_SAFE_MP4_FORMAT)
+        self.assertIn("[vcodec^=avc1]", options["format"])
+        self.assertIn("[acodec^=mp4a]", options["format"])
+        self.assertNotIn("bestvideo+bestaudio/best", options["format"])
+        self.assertEqual(options["merge_output_format"], "mp4")
+
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}
 
