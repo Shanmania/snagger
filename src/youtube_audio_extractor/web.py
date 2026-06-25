@@ -17,6 +17,7 @@ from uuid import uuid4
 
 from flask import Flask, Response, abort, after_this_request, jsonify, render_template_string, request, send_file, send_from_directory
 
+from . import __version__
 from .core import (
     DownloadSettings,
     MEDIA_FORMAT_CHOICES,
@@ -38,6 +39,8 @@ ALLOWED_YOUTUBE_HOSTS = {
     "youtube-nocookie.com",
     "www.youtube-nocookie.com",
 }
+
+APP_LAST_UPDATED = "2026-06-25 08:40 CDT"
 
 
 @dataclass
@@ -90,6 +93,8 @@ def create_app() -> Flask:
     def index() -> str:
         return render_template_string(
             INDEX_HTML,
+            app_last_updated=os.environ.get("SNAGGER_LAST_UPDATED", APP_LAST_UPDATED),
+            app_version=os.environ.get("SNAGGER_VERSION", __version__),
             media_format_choices=MEDIA_FORMAT_CHOICES,
             quality_choices=list(QUALITY_CHOICES),
         )
@@ -464,7 +469,7 @@ INDEX_HTML = """
     main {
       width: min(920px, calc(100vw - 28px));
       margin: 0 auto;
-      padding: 24px 0 28px;
+      padding: 24px 0 76px;
     }
 
     .topbar {
@@ -965,6 +970,39 @@ INDEX_HTML = """
       font-weight: 720;
     }
 
+    .version-badge {
+      position: fixed;
+      right: 14px;
+      bottom: 12px;
+      z-index: 20;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      max-width: calc(100vw - 28px);
+      min-height: 34px;
+      padding: 7px 11px;
+      border: 1px solid rgba(35, 199, 167, 0.22);
+      border-radius: 999px;
+      background: rgba(16, 20, 16, 0.9);
+      box-shadow: 0 12px 28px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+      line-height: 1.2;
+      backdrop-filter: blur(10px);
+    }
+
+    .version-badge strong {
+      color: var(--ink);
+      font-weight: 820;
+    }
+
+    .version-divider {
+      width: 1px;
+      height: 14px;
+      background: rgba(163, 173, 160, 0.35);
+    }
+
     [hidden] {
       display: none !important;
     }
@@ -1006,6 +1044,15 @@ INDEX_HTML = """
       .brand-mark img {
         width: 22px;
         height: 22px;
+      }
+
+      .version-badge {
+        right: 10px;
+        bottom: 8px;
+        left: 10px;
+        justify-content: center;
+        border-radius: 8px;
+        text-align: center;
       }
     }
   </style>
@@ -1125,6 +1172,12 @@ INDEX_HTML = """
       </aside>
     </div>
   </main>
+
+  <div class="version-badge" aria-label="Snagger version and last updated">
+    <strong>v{{ app_version }}</strong>
+    <span class="version-divider" aria-hidden="true"></span>
+    <span>Updated {{ app_last_updated }}</span>
+  </div>
 
   <script>
     const form = document.querySelector("#convertForm");

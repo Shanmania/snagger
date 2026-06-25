@@ -59,6 +59,9 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('class="brand-title"', html)
         self.assertIn('class="log-shell"', html)
         self.assertIn('id="logCount"', html)
+        self.assertIn('class="version-badge"', html)
+        self.assertIn("v0.2.0", html)
+        self.assertIn("Updated 2026-06-25 08:40 CDT", html)
         self.assertIn('id="previewPanel"', html)
         self.assertIn("Keep original source audio</span>", html)
 
