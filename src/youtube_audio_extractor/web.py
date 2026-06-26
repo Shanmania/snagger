@@ -40,7 +40,7 @@ ALLOWED_YOUTUBE_HOSTS = {
     "www.youtube-nocookie.com",
 }
 
-APP_LAST_UPDATED = "2026-06-26 01:12 CDT"
+APP_LAST_UPDATED = "2026-06-26 12:18 CDT"
 
 
 @dataclass
@@ -140,6 +140,7 @@ def create_app() -> Flask:
         keep_source_audio = output_format == "mp3" and bool(payload.get("keep_source_audio"))
         save_to_server = bool(payload.get("deploy_to_server"))
         download_playlist = should_download_playlist(payload, url, output_format)
+        combine_playlist = should_combine_playlist(payload, url, output_format, download_playlist)
 
         if not is_allowed_youtube_url(url):
             return {"error": "Enter a valid YouTube URL."}, 400
@@ -159,6 +160,7 @@ def create_app() -> Flask:
             keep_source_audio=keep_source_audio,
             output_format=output_format,
             allow_playlist=download_playlist,
+            combine_playlist=combine_playlist,
         )
         job = DownloadJob(
             id=uuid4().hex,
@@ -253,7 +255,7 @@ def is_youtube_linked_video_url(url: str) -> bool:
 
 
 def should_download_playlist(payload: dict[str, Any], url: str, output_format: str) -> bool:
-    if output_format != "mp3" or not is_youtube_playlist_url(url):
+    if output_format not in MEDIA_FORMAT_CHOICES or not is_youtube_playlist_url(url):
         return False
 
     if bool(payload.get("linked_video_only")) and is_youtube_linked_video_url(url):
@@ -263,6 +265,12 @@ def should_download_playlist(payload: dict[str, Any], url: str, output_format: s
     if requested is None:
         return not is_youtube_linked_video_url(url)
     return bool(requested)
+
+
+def should_combine_playlist(payload: dict[str, Any], url: str, output_format: str, download_playlist: bool) -> bool:
+    if output_format != "mp4" or not download_playlist or not is_youtube_playlist_url(url):
+        return False
+    return str(payload.get("playlist_mode") or "").strip().lower() == "combined"
 
 
 def find_job(job_id: str) -> DownloadJob:
@@ -299,7 +307,7 @@ def drain_events(job: DownloadJob) -> None:
             job.archive_path = None
             should_bundle = (
                 len(job.output_paths) > 1 or (job.settings.allow_playlist and job.output_paths)
-            )
+            ) and not job.settings.combine_playlist
             if should_bundle:
                 try:
                     archive_dir = job.settings.output_dir
@@ -405,6 +413,7 @@ def job_payload(job: DownloadJob) -> dict[str, Any]:
         "media_format": job.settings.output_format,
         "save_to_server": job.save_to_server,
         "playlist_download": job.settings.allow_playlist,
+        "playlist_mode": "combined" if job.settings.combine_playlist else "separate",
         "files_count": len(job.output_paths),
     }
     if job.status == "done" and job.output_path:
@@ -667,6 +676,65 @@ INDEX_HTML = """
 
     .playlist-row {
       color: #cfeee6;
+    }
+
+    .playlist-mode {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+      width: min(360px, 100%);
+      min-height: 42px;
+      padding: 5px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: #101410;
+    }
+
+    .playlist-mode label {
+      display: block;
+      min-width: 0;
+      color: inherit;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .playlist-mode input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .playlist-mode span {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      min-height: 30px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      color: var(--muted);
+      cursor: pointer;
+      text-align: center;
+      user-select: none;
+      transition: background 140ms ease, border-color 140ms ease, color 140ms ease, box-shadow 140ms ease;
+    }
+
+    .playlist-mode input:not(:checked):not(:disabled) + span:hover {
+      color: var(--ink);
+      background: #171d17;
+      border-color: #3c4739;
+    }
+
+    .playlist-mode input:checked + span {
+      color: #071310;
+      background: linear-gradient(135deg, var(--accent), #75e08f);
+      border-color: rgba(206, 255, 225, 0.22);
+      box-shadow: 0 8px 18px rgba(35, 199, 167, 0.18);
+    }
+
+    .playlist-mode input:disabled + span {
+      opacity: 0.48;
+      cursor: not-allowed;
     }
 
     .actions {
@@ -1110,8 +1178,22 @@ INDEX_HTML = """
 
           <label class="inline playlist-row" id="playlistRow" hidden>
             <input id="downloadPlaylist" name="downloadPlaylist" type="checkbox">
-            <span>Download playlist as separate MP3s</span>
+            <span id="playlistLabel">Download playlist as separate MP3s</span>
           </label>
+
+          <div class="field playlist-row" id="playlistModeRow" hidden>
+            <label>Playlist output</label>
+            <div class="playlist-mode" role="radiogroup" aria-label="Playlist output">
+              <label>
+                <input type="radio" name="playlistMode" value="separate" checked>
+                <span>Separate MP4s</span>
+              </label>
+              <label>
+                <input type="radio" name="playlistMode" value="combined">
+                <span>One MP4</span>
+              </label>
+            </div>
+          </div>
 
           <div class="actions">
             <button id="submitButton" type="submit">Snag MP3</button>
@@ -1188,6 +1270,9 @@ INDEX_HTML = """
     const linkedVideoRow = document.querySelector("#linkedVideoRow");
     const linkedVideoOnly = document.querySelector("#linkedVideoOnly");
     const playlistRow = document.querySelector("#playlistRow");
+    const playlistLabel = document.querySelector("#playlistLabel");
+    const playlistModeRow = document.querySelector("#playlistModeRow");
+    const playlistModeInputs = Array.from(document.querySelectorAll('input[name="playlistMode"]'));
     const downloadPlaylist = document.querySelector("#downloadPlaylist");
     const appState = document.querySelector("#appState");
     const submitButton = document.querySelector("#submitButton");
@@ -1227,8 +1312,12 @@ INDEX_HTML = """
     });
     downloadPlaylist.addEventListener("change", () => {
       playlistChoiceTouched = true;
+      syncPlaylistControls();
       schedulePreview();
     });
+    playlistModeInputs.forEach((input) => input.addEventListener("change", () => {
+      schedulePreview();
+    }));
     syncFormatControls();
 
     form.addEventListener("submit", async (event) => {
@@ -1245,8 +1334,9 @@ INDEX_HTML = """
         quality: form.quality.value,
         keep_source_audio: currentMediaFormat() === "mp3" && form.keepSource.checked,
         deploy_to_server: form.deployToServer.checked,
-        linked_video_only: currentMediaFormat() === "mp3" && form.linkedVideoOnly.checked,
-        download_playlist: currentMediaFormat() === "mp3" && !form.linkedVideoOnly.checked && form.downloadPlaylist.checked
+        linked_video_only: form.linkedVideoOnly.checked,
+        download_playlist: playlistDownloadRequested(),
+        playlist_mode: currentMediaFormat() === "mp4" ? currentPlaylistMode() : "separate"
       };
 
       try {
@@ -1394,11 +1484,22 @@ INDEX_HTML = """
       return selected ? selected.value : "mp3";
     }
 
+    function currentPlaylistMode() {
+      const selected = playlistModeInputs.find((input) => input.checked);
+      return selected ? selected.value : "separate";
+    }
+
+    function playlistDownloadRequested() {
+      return ["mp3", "mp4"].includes(currentMediaFormat()) && !linkedVideoOnly.checked && downloadPlaylist.checked;
+    }
+
     function syncPlaylistControls() {
-      const showPlaylistOption = currentMediaFormat() === "mp3" && looksLikePlaylist(urlInput.value);
+      const mode = currentMediaFormat();
+      const showPlaylistOption = ["mp3", "mp4"].includes(mode) && looksLikePlaylist(urlInput.value);
       const showLinkedVideoOption = showPlaylistOption && looksLikeLinkedVideo(urlInput.value);
       linkedVideoRow.hidden = !showLinkedVideoOption;
       playlistRow.hidden = !showPlaylistOption;
+      playlistLabel.textContent = mode === "mp4" ? "Download playlist videos" : "Download playlist as separate MP3s";
 
       if (showLinkedVideoOption && !linkedVideoChoiceTouched) {
         linkedVideoOnly.checked = true;
@@ -1421,6 +1522,13 @@ INDEX_HTML = """
         downloadPlaylist.checked = false;
         playlistChoiceTouched = false;
       }
+
+      const showPlaylistMode = showPlaylistOption && mode === "mp4" && !linkedVideoOnly.checked && downloadPlaylist.checked;
+      playlistModeRow.hidden = !showPlaylistMode;
+      playlistModeRow.style.opacity = showPlaylistMode ? "1" : "0.55";
+      playlistModeInputs.forEach((input) => {
+        input.disabled = !showPlaylistMode;
+      });
     }
 
     function schedulePreview() {
@@ -1449,7 +1557,7 @@ INDEX_HTML = """
         const params = new URLSearchParams({
           url: value,
           media_format: currentMediaFormat(),
-          download_playlist: String(currentMediaFormat() === "mp3" && !linkedVideoOnly.checked && downloadPlaylist.checked)
+          download_playlist: String(playlistDownloadRequested())
         });
         const response = await fetch(`/api/preview?${params.toString()}`, {signal: previewController.signal});
         const data = await response.json();

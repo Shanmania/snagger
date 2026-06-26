@@ -1,6 +1,6 @@
 [project]
 name = "snagger"
-version = "0.2.3"
+version = "0.3.0"
 description = "Web app for saving permitted YouTube URLs as MP3 audio or MP4 video."
 requires-python = ">=3.10"
 dependencies = [

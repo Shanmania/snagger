@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import queue
 import re
 import shutil
@@ -42,6 +43,7 @@ class DownloadSettings:
     keep_source_audio: bool
     output_format: str = "mp3"
     allow_playlist: bool = False
+    combine_playlist: bool = False
 
 
 class QueueLogger:
@@ -415,6 +417,111 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
             temp_path.unlink()
 
 
+def combine_mp4_playlist_for_premiere(paths: list[Path], ffmpeg_path: str) -> Path | None:
+    input_paths = [path.resolve() for path in paths if path.is_file()]
+    if not input_paths:
+        return None
+    if len(input_paths) == 1:
+        return input_paths[0]
+
+    parent_paths = [path.parent for path in input_paths]
+    output_dir = Path(os.path.commonpath([str(parent) for parent in parent_paths]))
+    output_dir.mkdir(parents=True, exist_ok=True)
+    output_path = unique_media_path(output_dir / f"{safe_media_filename(output_dir.name)}.mp4")
+    temp_path = output_path.with_name(f".snagger-combined-{time.time_ns()}{output_path.suffix}")
+    counter = 2
+    while temp_path.exists():
+        temp_path = output_path.with_name(f".snagger-combined-{time.time_ns()}-{counter}{output_path.suffix}")
+        counter += 1
+
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+    ]
+    for path in input_paths:
+        command.extend(["-i", str(path)])
+
+    filters: list[str] = []
+    concat_inputs: list[str] = []
+    for index, _path in enumerate(input_paths):
+        filters.append(
+            f"[{index}:v:0]scale=1920:1080:force_original_aspect_ratio=decrease,"
+            f"pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30,format=yuv420p[v{index}]"
+        )
+        filters.append(
+            f"[{index}:a:0]aresample=48000,aformat=sample_rates=48000:channel_layouts=stereo[a{index}]"
+        )
+        concat_inputs.extend([f"[v{index}]", f"[a{index}]"])
+
+    filter_complex = ";".join(filters + [f"{''.join(concat_inputs)}concat=n={len(input_paths)}:v=1:a=1[v][a]"])
+    command.extend(
+        [
+            "-filter_complex",
+            filter_complex,
+            "-map",
+            "[v]",
+            "-map",
+            "[a]",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "medium",
+            "-crf",
+            "18",
+            "-profile:v",
+            "high",
+            "-pix_fmt",
+            "yuv420p",
+            "-tag:v",
+            "avc1",
+            "-c:a",
+            "aac",
+            "-profile:a",
+            "aac_low",
+            "-b:a",
+            "192k",
+            "-ar",
+            "48000",
+            "-ac",
+            "2",
+            "-tag:a",
+            "mp4a",
+            "-movflags",
+            "+faststart",
+            "-f",
+            "mp4",
+            str(temp_path),
+        ]
+    )
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            message = clean_message(result.stderr or result.stdout or "unknown FFmpeg error")
+            raise RuntimeError(f"Could not combine playlist into one MP4: {message}")
+        temp_path.replace(output_path)
+        return output_path
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
+def safe_media_filename(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._ -]+", "_", value).strip(" ._")
+    return cleaned[:120] or "snagger-playlist"
+
+
+def unique_media_path(path: Path) -> Path:
+    candidate = path
+    counter = 2
+    while candidate.exists():
+        candidate = path.with_name(f"{path.stem}-{counter}{path.suffix}")
+        counter += 1
+    return candidate
+
+
 def locate_output_file(output_dir: Path, started_at: float, suffix: str) -> Path | None:
     candidates = [
         path
@@ -522,10 +629,25 @@ def download_media(
             for output_path in output_paths:
                 transcode_mp4_for_premiere(output_path, ydl_options["ffmpeg_location"])
             events.put(("log", "Rebuilt MP4 for Premiere from extracted WAV audio: H.264 video and AAC-LC stereo at 48 kHz."))
+            if settings.allow_playlist and settings.combine_playlist:
+                events.put(("status", "Combining playlist into one MP4..."))
+                separate_paths = list(output_paths)
+                combined_path = combine_mp4_playlist_for_premiere(output_paths, ydl_options["ffmpeg_location"])
+                if combined_path:
+                    for path in separate_paths:
+                        if path.resolve() != combined_path.resolve():
+                            path.unlink(missing_ok=True)
+                    output_paths = [combined_path]
+                else:
+                    output_paths = []
+                events.put(("log", "Combined playlist videos into one Premiere-friendly MP4."))
         events.put(("progress", 100.0))
         if settings.allow_playlist:
             if output_paths:
-                events.put(("status", f"Done: {len(output_paths)} MP3 files"))
+                if settings.output_format == "mp4" and settings.combine_playlist:
+                    events.put(("status", f"Done: {output_paths[0].name}"))
+                else:
+                    events.put(("status", f"Done: {len(output_paths)} {settings.output_format.upper()} files"))
                 events.put(("done", output_paths))
             else:
                 events.put(("status", "Done."))
