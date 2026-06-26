@@ -56,16 +56,15 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('name="deployToServer"', html)
         self.assertIn('name="linkedVideoOnly"', html)
         self.assertIn('name="downloadPlaylist"', html)
-        self.assertIn('name="playlistMode"', html)
-        self.assertIn("Separate MP4s", html)
-        self.assertIn("One MP4", html)
+        self.assertNotIn('name="playlistMode"', html)
+        self.assertNotIn("One MP4", html)
         self.assertIn('href="/favicon.ico?v=3"', html)
         self.assertIn('class="brand-title"', html)
         self.assertIn('class="log-shell"', html)
         self.assertIn('id="logCount"', html)
         self.assertIn('class="version-badge"', html)
-        self.assertIn("v0.3.0", html)
-        self.assertIn("Updated 2026-06-26 12:18 CDT", html)
+        self.assertIn("v0.3.1", html)
+        self.assertIn("Updated 2026-06-26 14:02 CDT", html)
         self.assertIn('id="previewPanel"', html)
         self.assertIn("Keep original source audio</span>", html)
 
@@ -444,7 +443,6 @@ class WebAppTest(unittest.TestCase):
         def fake_download(settings, events):
             self.assertEqual(settings.output_format, "mp4")
             self.assertTrue(settings.allow_playlist)
-            self.assertFalse(settings.combine_playlist)
             playlist_dir = Path(settings.output_dir) / "Video Playlist"
             playlist_dir.mkdir(parents=True)
             first_path = playlist_dir / "001 - First [abc].mp4"
@@ -462,7 +460,6 @@ class WebAppTest(unittest.TestCase):
                     "url": "https://www.youtube.com/playlist?list=PL123",
                     "media_format": "mp4",
                     "download_playlist": True,
-                    "playlist_mode": "separate",
                 },
             )
 
@@ -480,56 +477,8 @@ class WebAppTest(unittest.TestCase):
         self.assertIsNotNone(payload)
         self.assertEqual(payload["status"], "done")
         self.assertTrue(payload["playlist_download"])
-        self.assertEqual(payload["playlist_mode"], "separate")
         self.assertEqual(payload["download_label"], "ZIP")
         self.assertEqual(payload["filename"], "Video Playlist.zip")
-
-    def test_mp4_playlist_can_combine_into_single_file(self) -> None:
-        def fake_download(settings, events):
-            self.assertEqual(settings.output_format, "mp4")
-            self.assertTrue(settings.allow_playlist)
-            self.assertTrue(settings.combine_playlist)
-            playlist_dir = Path(settings.output_dir) / "Video Playlist"
-            playlist_dir.mkdir(parents=True)
-            output_path = playlist_dir / "Video Playlist.mp4"
-            output_path.write_bytes(b"combined")
-            events.put(("status", "Done: Video Playlist.mp4"))
-            events.put(("progress", 100.0))
-            events.put(("done", [output_path]))
-
-        with patch.object(web, "download_media", side_effect=fake_download):
-            create_response = self.client.post(
-                "/api/jobs",
-                json={
-                    "url": "https://www.youtube.com/playlist?list=PL123",
-                    "media_format": "mp4",
-                    "download_playlist": True,
-                    "playlist_mode": "combined",
-                },
-            )
-
-        self.assertEqual(create_response.status_code, 202)
-        job_id = create_response.get_json()["id"]
-
-        payload = None
-        for _ in range(20):
-            poll_response = self.client.get(f"/api/jobs/{job_id}")
-            payload = poll_response.get_json()
-            if payload["status"] == "done":
-                break
-            time.sleep(0.05)
-
-        self.assertIsNotNone(payload)
-        self.assertEqual(payload["status"], "done")
-        self.assertTrue(payload["playlist_download"])
-        self.assertEqual(payload["playlist_mode"], "combined")
-        self.assertEqual(payload["download_label"], "MP4")
-        self.assertEqual(payload["filename"], "Video Playlist.mp4")
-
-        download_response = self.client.get(payload["download_url"])
-        self.assertEqual(download_response.status_code, 200)
-        self.assertEqual(download_response.data, b"combined")
-        download_response.close()
 
     def test_server_deploy_playlist_saves_folder_and_temp_browser_zip(self) -> None:
         captured_paths: list[Path] = []
@@ -703,40 +652,6 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("-tag:a", stitch_command)
         self.assertEqual(stitch_command[stitch_command.index("-tag:a") + 1], "mp4a")
         self.assertIn("+faststart", stitch_command)
-
-    def test_mp4_playlist_combiner_outputs_uniform_premiere_safe_file(self) -> None:
-        playlist_dir = Path(self.tempdir.name) / "Video Playlist"
-        playlist_dir.mkdir()
-        first_path = playlist_dir / "001 - First.mp4"
-        second_path = playlist_dir / "002 - Second.mp4"
-        first_path.write_bytes(b"first")
-        second_path.write_bytes(b"second")
-        captured_command: list[str] = []
-
-        def fake_run(command, **kwargs):
-            captured_command.extend(command)
-            Path(command[-1]).write_bytes(b"combined")
-            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
-
-        with patch.object(core.subprocess, "run", side_effect=fake_run):
-            output_path = core.combine_mp4_playlist_for_premiere([first_path, second_path], "/usr/bin/ffmpeg")
-
-        self.assertIsNotNone(output_path)
-        self.assertEqual(output_path.name, "Video Playlist.mp4")
-        self.assertEqual(output_path.read_bytes(), b"combined")
-        self.assertIn("-filter_complex", captured_command)
-        filter_complex = captured_command[captured_command.index("-filter_complex") + 1]
-        self.assertIn("scale=1920:1080", filter_complex)
-        self.assertIn("fps=30", filter_complex)
-        self.assertIn("concat=n=2:v=1:a=1", filter_complex)
-        self.assertIn("-c:v", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-c:v") + 1], "libx264")
-        self.assertIn("-c:a", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-c:a") + 1], "aac")
-        self.assertIn("-tag:v", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-tag:v") + 1], "avc1")
-        self.assertIn("-tag:a", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-tag:a") + 1], "mp4a")
 
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}
