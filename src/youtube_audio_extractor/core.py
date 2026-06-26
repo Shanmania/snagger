@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import re
 import shutil
+import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -314,6 +315,52 @@ def build_ydl_options(
     return options
 
 
+def normalize_mp4_audio_for_premiere(path: Path, ffmpeg_path: str) -> None:
+    temp_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}{path.suffix}")
+    counter = 2
+    while temp_path.exists():
+        temp_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}-{counter}{path.suffix}")
+        counter += 1
+
+    command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "0:a:0?",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "aac",
+        "-profile:a",
+        "aac_low",
+        "-b:a",
+        "192k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(temp_path),
+    ]
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            message = clean_message(result.stderr or result.stdout or "unknown FFmpeg error")
+            raise RuntimeError(f"Could not make Premiere-friendly MP4 audio: {message}")
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+
 def locate_output_file(output_dir: Path, started_at: float, suffix: str) -> Path | None:
     candidates = [
         path
@@ -406,7 +453,7 @@ def download_media(
             if settings.keep_source_audio:
                 events.put(("log", "Keeping the original source audio file too."))
         else:
-            events.put(("log", "Using Premiere-friendly MP4 video: H.264 video with AAC audio."))
+            events.put(("log", "Using Premiere-friendly MP4 video: H.264 video with AAC-LC audio."))
 
         ydl_options = build_ydl_options(settings, events)
         with yt_dlp.YoutubeDL(ydl_options) as ydl:
@@ -416,6 +463,11 @@ def download_media(
         output_paths = [path for path in expected_paths if path.exists()]
         if not output_paths:
             output_paths = locate_output_files(settings.output_dir, started_at, settings.output_format)
+        if settings.output_format == "mp4" and output_paths:
+            events.put(("status", "Making MP4 audio Premiere-friendly..."))
+            for output_path in output_paths:
+                normalize_mp4_audio_for_premiere(output_path, ydl_options["ffmpeg_location"])
+            events.put(("log", "Normalized MP4 audio for Premiere: AAC-LC stereo at 48 kHz."))
         events.put(("progress", 100.0))
         if settings.allow_playlist:
             if output_paths:

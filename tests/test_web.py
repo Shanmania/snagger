@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import queue
+import subprocess
 import tempfile
 import time
 import unittest
@@ -60,8 +61,8 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('class="log-shell"', html)
         self.assertIn('id="logCount"', html)
         self.assertIn('class="version-badge"', html)
-        self.assertIn("v0.2.0", html)
-        self.assertIn("Updated 2026-06-25 08:40 CDT", html)
+        self.assertIn("v0.2.1", html)
+        self.assertIn("Updated 2026-06-26 00:50 CDT", html)
         self.assertIn('id="previewPanel"', html)
         self.assertIn("Keep original source audio</span>", html)
 
@@ -561,6 +562,32 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("[acodec^=mp4a]", options["format"])
         self.assertNotIn("bestvideo+bestaudio/best", options["format"])
         self.assertEqual(options["merge_output_format"], "mp4")
+
+    def test_mp4_audio_normalizer_forces_premiere_safe_aac(self) -> None:
+        source_path = Path(self.tempdir.name) / "sample.mp4"
+        source_path.write_bytes(b"original")
+        captured_command: list[str] = []
+
+        def fake_run(command, **kwargs):
+            captured_command.extend(command)
+            Path(command[-1]).write_bytes(b"normalized")
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with patch.object(core.subprocess, "run", side_effect=fake_run):
+            core.normalize_mp4_audio_for_premiere(source_path, "/usr/bin/ffmpeg")
+
+        self.assertEqual(source_path.read_bytes(), b"normalized")
+        self.assertIn("-c:v", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-c:v") + 1], "copy")
+        self.assertIn("-c:a", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-c:a") + 1], "aac")
+        self.assertIn("-profile:a", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-profile:a") + 1], "aac_low")
+        self.assertIn("-ar", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-ar") + 1], "48000")
+        self.assertIn("-ac", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-ac") + 1], "2")
+        self.assertIn("+faststart", captured_command)
 
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}

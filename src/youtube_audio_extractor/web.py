@@ -40,7 +40,7 @@ ALLOWED_YOUTUBE_HOSTS = {
     "www.youtube-nocookie.com",
 }
 
-APP_LAST_UPDATED = "2026-06-25 08:40 CDT"
+APP_LAST_UPDATED = "2026-06-26 00:50 CDT"
 
 
 @dataclass
