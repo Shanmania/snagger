@@ -316,13 +316,36 @@ def build_ydl_options(
 
 
 def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
+    audio_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}.wav")
     temp_path = path.with_name(f".snagger-premiere-{time.time_ns()}{path.suffix}")
     counter = 2
-    while temp_path.exists():
+    while audio_path.exists() or temp_path.exists():
+        audio_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}-{counter}.wav")
         temp_path = path.with_name(f".snagger-premiere-{time.time_ns()}-{counter}{path.suffix}")
         counter += 1
 
-    command = [
+    extract_audio_command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(path),
+        "-vn",
+        "-map",
+        "0:a:0",
+        "-acodec",
+        "pcm_s16le",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-f",
+        "wav",
+        str(audio_path),
+    ]
+
+    stitch_command = [
         ffmpeg_path,
         "-hide_banner",
         "-nostdin",
@@ -331,10 +354,12 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
         "+genpts",
         "-i",
         str(path),
+        "-i",
+        str(audio_path),
         "-map",
         "0:v:0",
         "-map",
-        "0:a:0",
+        "1:a:0",
         "-c:v",
         "libx264",
         "-preset",
@@ -365,6 +390,7 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
         "0",
         "-avoid_negative_ts",
         "make_zero",
+        "-shortest",
         "-movflags",
         "+faststart",
         "-f",
@@ -373,12 +399,18 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
     ]
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True)
-        if result.returncode != 0:
-            message = clean_message(result.stderr or result.stdout or "unknown FFmpeg error")
-            raise RuntimeError(f"Could not make a Premiere-friendly MP4: {message}")
+        for label, command in (
+            ("extract MP4 audio", extract_audio_command),
+            ("stitch Premiere-friendly MP4", stitch_command),
+        ):
+            result = subprocess.run(command, capture_output=True, text=True)
+            if result.returncode != 0:
+                message = clean_message(result.stderr or result.stdout or "unknown FFmpeg error")
+                raise RuntimeError(f"Could not {label}: {message}")
         temp_path.replace(path)
     finally:
+        if audio_path.exists():
+            audio_path.unlink()
         if temp_path.exists():
             temp_path.unlink()
 
@@ -475,7 +507,7 @@ def download_media(
             if settings.keep_source_audio:
                 events.put(("log", "Keeping the original source audio file too."))
         else:
-            events.put(("log", "Using Premiere-friendly MP4 video: H.264 video with AAC-LC audio."))
+            events.put(("log", "Using Premiere-friendly MP4 rebuild: extract audio to WAV, then stitch a new H.264/AAC MP4."))
 
         ydl_options = build_ydl_options(settings, events)
         with yt_dlp.YoutubeDL(ydl_options) as ydl:
@@ -486,10 +518,10 @@ def download_media(
         if not output_paths:
             output_paths = locate_output_files(settings.output_dir, started_at, settings.output_format)
         if settings.output_format == "mp4" and output_paths:
-            events.put(("status", "Transcoding MP4 for Premiere..."))
+            events.put(("status", "Extracting audio and stitching MP4 for Premiere..."))
             for output_path in output_paths:
                 transcode_mp4_for_premiere(output_path, ydl_options["ffmpeg_location"])
-            events.put(("log", "Transcoded MP4 for Premiere: H.264 video and AAC-LC stereo at 48 kHz."))
+            events.put(("log", "Rebuilt MP4 for Premiere from extracted WAV audio: H.264 video and AAC-LC stereo at 48 kHz."))
         events.put(("progress", 100.0))
         if settings.allow_playlist:
             if output_paths:

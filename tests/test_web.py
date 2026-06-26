@@ -61,8 +61,8 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('class="log-shell"', html)
         self.assertIn('id="logCount"', html)
         self.assertIn('class="version-badge"', html)
-        self.assertIn("v0.2.2", html)
-        self.assertIn("Updated 2026-06-26 01:06 CDT", html)
+        self.assertIn("v0.2.3", html)
+        self.assertIn("Updated 2026-06-26 01:12 CDT", html)
         self.assertIn('id="previewPanel"', html)
         self.assertIn("Keep original source audio</span>", html)
 
@@ -566,38 +566,50 @@ class WebAppTest(unittest.TestCase):
     def test_mp4_transcoder_forces_premiere_safe_codecs(self) -> None:
         source_path = Path(self.tempdir.name) / "sample.mp4"
         source_path.write_bytes(b"original")
-        captured_command: list[str] = []
+        captured_commands: list[list[str]] = []
 
         def fake_run(command, **kwargs):
-            captured_command.extend(command)
-            Path(command[-1]).write_bytes(b"normalized")
+            captured_commands.append(command)
+            output_path = Path(command[-1])
+            output_path.write_bytes(b"wav" if output_path.suffix == ".wav" else b"normalized")
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         with patch.object(core.subprocess, "run", side_effect=fake_run):
             core.transcode_mp4_for_premiere(source_path, "/usr/bin/ffmpeg")
 
         self.assertEqual(source_path.read_bytes(), b"normalized")
-        self.assertIn("-map", captured_command)
-        self.assertIn("0:v:0", captured_command)
-        self.assertIn("0:a:0", captured_command)
-        self.assertNotIn("0:a:0?", captured_command)
-        self.assertIn("-c:v", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-c:v") + 1], "libx264")
-        self.assertIn("-pix_fmt", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-pix_fmt") + 1], "yuv420p")
-        self.assertIn("-tag:v", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-tag:v") + 1], "avc1")
-        self.assertIn("-c:a", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-c:a") + 1], "aac")
-        self.assertIn("-profile:a", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-profile:a") + 1], "aac_low")
-        self.assertIn("-ar", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-ar") + 1], "48000")
-        self.assertIn("-ac", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-ac") + 1], "2")
-        self.assertIn("-tag:a", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-tag:a") + 1], "mp4a")
-        self.assertIn("+faststart", captured_command)
+        self.assertEqual(len(captured_commands), 2)
+        extract_command, stitch_command = captured_commands
+        audio_path = Path(extract_command[-1])
+
+        self.assertEqual(audio_path.suffix, ".wav")
+        self.assertIn("-vn", extract_command)
+        self.assertIn("0:a:0", extract_command)
+        self.assertIn("-acodec", extract_command)
+        self.assertEqual(extract_command[extract_command.index("-acodec") + 1], "pcm_s16le")
+        self.assertFalse(audio_path.exists())
+
+        self.assertIn(str(audio_path), stitch_command)
+        self.assertIn("0:v:0", stitch_command)
+        self.assertIn("1:a:0", stitch_command)
+        self.assertNotIn("0:a:0?", stitch_command)
+        self.assertIn("-c:v", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-c:v") + 1], "libx264")
+        self.assertIn("-pix_fmt", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-pix_fmt") + 1], "yuv420p")
+        self.assertIn("-tag:v", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-tag:v") + 1], "avc1")
+        self.assertIn("-c:a", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-c:a") + 1], "aac")
+        self.assertIn("-profile:a", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-profile:a") + 1], "aac_low")
+        self.assertIn("-ar", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-ar") + 1], "48000")
+        self.assertIn("-ac", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-ac") + 1], "2")
+        self.assertIn("-tag:a", stitch_command)
+        self.assertEqual(stitch_command[stitch_command.index("-tag:a") + 1], "mp4a")
+        self.assertIn("+faststart", stitch_command)
 
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}
