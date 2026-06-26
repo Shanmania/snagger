@@ -40,7 +40,7 @@ ALLOWED_YOUTUBE_HOSTS = {
     "www.youtube-nocookie.com",
 }
 
-APP_LAST_UPDATED = "2026-06-26 14:02 CDT"
+APP_LAST_UPDATED = "2026-06-26 14:30 CDT"
 
 
 @dataclass
@@ -669,6 +669,16 @@ INDEX_HTML = """
       color: #cfeee6;
     }
 
+    .playlist-choice {
+      display: grid;
+      gap: 2px;
+      margin-bottom: 12px;
+    }
+
+    .playlist-choice .inline {
+      margin-bottom: 0;
+    }
+
     .actions {
       display: flex;
       gap: 10px;
@@ -1103,15 +1113,17 @@ INDEX_HTML = """
             <span>Keep original source audio</span>
           </label>
 
-          <label class="inline playlist-row" id="linkedVideoRow" hidden>
-            <input id="linkedVideoOnly" name="linkedVideoOnly" type="checkbox">
-            <span>Download linked video only</span>
-          </label>
+          <div class="playlist-choice" id="playlistChoiceGroup" role="radiogroup" aria-label="Playlist choice" hidden>
+            <label class="inline playlist-row" id="linkedVideoRow" hidden>
+              <input id="linkedVideoOnly" name="playlistChoice" type="radio" value="linked">
+              <span>Download linked video only</span>
+            </label>
 
-          <label class="inline playlist-row" id="playlistRow" hidden>
-            <input id="downloadPlaylist" name="downloadPlaylist" type="checkbox">
-            <span id="playlistLabel">Download playlist as separate MP3s</span>
-          </label>
+            <label class="inline playlist-row" id="playlistRow" hidden>
+              <input id="downloadPlaylist" name="playlistChoice" type="radio" value="playlist">
+              <span id="playlistLabel">Download playlist as separate MP3s</span>
+            </label>
+          </div>
 
           <div class="actions">
             <button id="submitButton" type="submit">Snag MP3</button>
@@ -1185,6 +1197,8 @@ INDEX_HTML = """
     const mediaFormatInputs = Array.from(document.querySelectorAll('input[name="media_format"]'));
     const qualityField = document.querySelector("#qualityField");
     const keepSourceRow = document.querySelector("#keepSourceRow");
+    const playlistChoiceGroup = document.querySelector("#playlistChoiceGroup");
+    const playlistChoiceInputs = Array.from(document.querySelectorAll('input[name="playlistChoice"]'));
     const linkedVideoRow = document.querySelector("#linkedVideoRow");
     const linkedVideoOnly = document.querySelector("#linkedVideoOnly");
     const playlistRow = document.querySelector("#playlistRow");
@@ -1214,23 +1228,17 @@ INDEX_HTML = """
     let previewController = null;
     let previewRequestId = 0;
     let playlistChoiceTouched = false;
-    let linkedVideoChoiceTouched = false;
 
     mediaFormatInputs.forEach((input) => input.addEventListener("change", syncFormatControls));
     urlInput.addEventListener("input", () => {
       syncPlaylistControls();
       schedulePreview();
     });
-    linkedVideoOnly.addEventListener("change", () => {
-      linkedVideoChoiceTouched = true;
-      syncPlaylistControls();
-      schedulePreview();
-    });
-    downloadPlaylist.addEventListener("change", () => {
+    playlistChoiceInputs.forEach((input) => input.addEventListener("change", () => {
       playlistChoiceTouched = true;
       syncPlaylistControls();
       schedulePreview();
-    });
+    }));
     syncFormatControls();
 
     form.addEventListener("submit", async (event) => {
@@ -1247,7 +1255,7 @@ INDEX_HTML = """
         quality: form.quality.value,
         keep_source_audio: currentMediaFormat() === "mp3" && form.keepSource.checked,
         deploy_to_server: form.deployToServer.checked,
-        linked_video_only: form.linkedVideoOnly.checked,
+        linked_video_only: linkedVideoOnly.checked,
         download_playlist: playlistDownloadRequested()
       };
 
@@ -1397,39 +1405,40 @@ INDEX_HTML = """
     }
 
     function playlistDownloadRequested() {
-      return ["mp3", "mp4"].includes(currentMediaFormat()) && !linkedVideoOnly.checked && downloadPlaylist.checked;
+      return ["mp3", "mp4"].includes(currentMediaFormat()) && downloadPlaylist.checked;
     }
 
     function syncPlaylistControls() {
       const mode = currentMediaFormat();
       const showPlaylistOption = ["mp3", "mp4"].includes(mode) && looksLikePlaylist(urlInput.value);
       const showLinkedVideoOption = showPlaylistOption && looksLikeLinkedVideo(urlInput.value);
+      playlistChoiceGroup.hidden = !showPlaylistOption;
       linkedVideoRow.hidden = !showLinkedVideoOption;
       playlistRow.hidden = !showPlaylistOption;
       playlistLabel.textContent = mode === "mp4" ? "Download playlist as separate MP4s" : "Download playlist as separate MP3s";
 
-      if (showLinkedVideoOption && !linkedVideoChoiceTouched) {
-        linkedVideoOnly.checked = true;
-      }
-      if (!showLinkedVideoOption) {
-        linkedVideoOnly.checked = false;
-        linkedVideoChoiceTouched = false;
-      }
-
-      downloadPlaylist.disabled = linkedVideoOnly.checked;
-      playlistRow.style.opacity = linkedVideoOnly.checked ? "0.55" : "1";
-
-      if (showPlaylistOption && !playlistChoiceTouched && !linkedVideoOnly.checked) {
-        downloadPlaylist.checked = true;
-      }
-      if (linkedVideoOnly.checked) {
-        downloadPlaylist.checked = false;
-      }
       if (!showPlaylistOption) {
+        linkedVideoOnly.checked = false;
         downloadPlaylist.checked = false;
         playlistChoiceTouched = false;
+        return;
       }
 
+      if (!showLinkedVideoOption) {
+        linkedVideoOnly.checked = false;
+        downloadPlaylist.checked = true;
+        playlistChoiceTouched = false;
+        return;
+      }
+
+      if (!playlistChoiceTouched) {
+        linkedVideoOnly.checked = true;
+        downloadPlaylist.checked = false;
+      }
+
+      if (!linkedVideoOnly.checked && !downloadPlaylist.checked) {
+        linkedVideoOnly.checked = true;
+      }
     }
 
     function schedulePreview() {
