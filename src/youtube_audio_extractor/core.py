@@ -316,12 +316,17 @@ def build_ydl_options(
 
 
 def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
-    audio_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}.wav")
-    temp_path = path.with_name(f".snagger-premiere-{time.time_ns()}{path.suffix}")
+    audio_wav_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}.wav")
+    audio_m4a_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}.m4a")
+    video_path = path.with_name(f".snagger-premiere-video-{time.time_ns()}{path.suffix}")
+    temp_path = path.with_name(f".snagger-premiere-final-{time.time_ns()}{path.suffix}")
     counter = 2
-    while audio_path.exists() or temp_path.exists():
-        audio_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}-{counter}.wav")
-        temp_path = path.with_name(f".snagger-premiere-{time.time_ns()}-{counter}{path.suffix}")
+    while audio_wav_path.exists() or audio_m4a_path.exists() or video_path.exists() or temp_path.exists():
+        token = time.time_ns()
+        audio_wav_path = path.with_name(f".snagger-premiere-audio-{token}-{counter}.wav")
+        audio_m4a_path = path.with_name(f".snagger-premiere-audio-{token}-{counter}.m4a")
+        video_path = path.with_name(f".snagger-premiere-video-{token}-{counter}{path.suffix}")
+        temp_path = path.with_name(f".snagger-premiere-final-{token}-{counter}{path.suffix}")
         counter += 1
 
     extract_audio_command = [
@@ -342,10 +347,35 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
         "2",
         "-f",
         "wav",
-        str(audio_path),
+        str(audio_wav_path),
     ]
 
-    stitch_command = [
+    encode_audio_command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(audio_wav_path),
+        "-vn",
+        "-c:a",
+        "aac",
+        "-profile:a",
+        "aac_low",
+        "-b:a",
+        "192k",
+        "-ar",
+        "48000",
+        "-ac",
+        "2",
+        "-tag:a",
+        "mp4a",
+        "-movflags",
+        "+faststart",
+        str(audio_m4a_path),
+    ]
+
+    encode_video_command = [
         ffmpeg_path,
         "-hide_banner",
         "-nostdin",
@@ -354,12 +384,9 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
         "+genpts",
         "-i",
         str(path),
-        "-i",
-        str(audio_path),
         "-map",
         "0:v:0",
-        "-map",
-        "1:a:0",
+        "-an",
         "-c:v",
         "libx264",
         "-preset",
@@ -372,24 +399,38 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
         "yuv420p",
         "-tag:v",
         "avc1",
-        "-c:a",
-        "aac",
-        "-profile:a",
-        "aac_low",
-        "-b:a",
-        "192k",
-        "-ar",
-        "48000",
-        "-ac",
-        "2",
-        "-af",
-        "aresample=async=1:first_pts=0",
-        "-tag:a",
-        "mp4a",
         "-map_metadata",
         "0",
         "-avoid_negative_ts",
         "make_zero",
+        "-movflags",
+        "+faststart",
+        "-f",
+        "mp4",
+        str(video_path),
+    ]
+
+    mux_command = [
+        ffmpeg_path,
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-i",
+        str(video_path),
+        "-i",
+        str(audio_m4a_path),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        "copy",
+        "-tag:v",
+        "avc1",
+        "-tag:a",
+        "mp4a",
         "-shortest",
         "-movflags",
         "+faststart",
@@ -401,18 +442,60 @@ def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
     try:
         for label, command in (
             ("extract MP4 audio", extract_audio_command),
-            ("stitch Premiere-friendly MP4", stitch_command),
+            ("encode Premiere-friendly audio", encode_audio_command),
+            ("encode Premiere-friendly video", encode_video_command),
+            ("mux Premiere-friendly MP4", mux_command),
         ):
             result = subprocess.run(command, capture_output=True, text=True)
             if result.returncode != 0:
                 message = clean_message(result.stderr or result.stdout or "unknown FFmpeg error")
                 raise RuntimeError(f"Could not {label}: {message}")
+        verify_mp4_has_audio_stream(temp_path, ffmpeg_path)
         temp_path.replace(path)
     finally:
-        if audio_path.exists():
-            audio_path.unlink()
-        if temp_path.exists():
-            temp_path.unlink()
+        for temporary_path in (audio_wav_path, audio_m4a_path, video_path, temp_path):
+            if temporary_path.exists():
+                temporary_path.unlink()
+
+
+def resolve_ffprobe(ffmpeg_path: str) -> str | None:
+    sibling = Path(ffmpeg_path).with_name("ffprobe")
+    if sibling.exists():
+        return str(sibling)
+    return shutil.which("ffprobe") or shutil.which("ffprobe.exe")
+
+
+def verify_mp4_has_audio_stream(path: Path, ffmpeg_path: str) -> None:
+    ffprobe_path = resolve_ffprobe(ffmpeg_path)
+    if ffprobe_path:
+        result = subprocess.run(
+            [
+                ffprobe_path,
+                "-v",
+                "error",
+                "-select_streams",
+                "a:0",
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "csv=p=0",
+                str(path),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return
+        message = clean_message(result.stderr or "final MP4 has no audio stream")
+        raise RuntimeError(f"Could not verify MP4 audio stream: {message}")
+
+    result = subprocess.run(
+        [ffmpeg_path, "-hide_banner", "-i", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if "Audio:" not in result.stderr:
+        raise RuntimeError("Could not verify MP4 audio stream: final MP4 has no audio stream")
 
 
 def locate_output_file(output_dir: Path, started_at: float, suffix: str) -> Path | None:
@@ -521,6 +604,7 @@ def download_media(
             events.put(("status", "Extracting audio and stitching MP4 for Premiere..."))
             for output_path in output_paths:
                 transcode_mp4_for_premiere(output_path, ydl_options["ffmpeg_location"])
+                events.put(("log", f"Finalized MP4 audio/video stitch: {output_path.name}"))
             events.put(("log", "Rebuilt MP4 for Premiere from extracted WAV audio: H.264 video and AAC-LC stereo at 48 kHz."))
         events.put(("progress", 100.0))
         if settings.allow_playlist:

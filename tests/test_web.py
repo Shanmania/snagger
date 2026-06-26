@@ -65,8 +65,8 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('class="log-shell"', html)
         self.assertIn('id="logCount"', html)
         self.assertIn('class="version-badge"', html)
-        self.assertIn("v0.3.2", html)
-        self.assertIn("Updated 2026-06-26 14:30 CDT", html)
+        self.assertIn("v0.3.3", html)
+        self.assertIn("Updated 2026-06-26 14:50 CDT", html)
         self.assertIn('id="previewPanel"', html)
         self.assertIn("Keep original source audio</span>", html)
 
@@ -614,46 +614,76 @@ class WebAppTest(unittest.TestCase):
 
         def fake_run(command, **kwargs):
             captured_commands.append(command)
+            if "ffprobe" in str(command[0]):
+                return subprocess.CompletedProcess(command, 0, stdout="audio\n", stderr="")
             output_path = Path(command[-1])
             output_path.write_bytes(b"wav" if output_path.suffix == ".wav" else b"normalized")
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
-        with patch.object(core.subprocess, "run", side_effect=fake_run):
-            core.transcode_mp4_for_premiere(source_path, "/usr/bin/ffmpeg")
+        with patch.object(core, "resolve_ffprobe", return_value="/usr/bin/ffprobe"):
+            with patch.object(core.subprocess, "run", side_effect=fake_run):
+                core.transcode_mp4_for_premiere(source_path, "/usr/bin/ffmpeg")
 
         self.assertEqual(source_path.read_bytes(), b"normalized")
-        self.assertEqual(len(captured_commands), 2)
-        extract_command, stitch_command = captured_commands
-        audio_path = Path(extract_command[-1])
+        self.assertEqual(len(captured_commands), 5)
+        extract_command, encode_audio_command, encode_video_command, mux_command, verify_command = captured_commands
+        audio_wav_path = Path(extract_command[-1])
+        audio_m4a_path = Path(encode_audio_command[-1])
+        video_path = Path(encode_video_command[-1])
 
-        self.assertEqual(audio_path.suffix, ".wav")
+        self.assertEqual(audio_wav_path.suffix, ".wav")
         self.assertIn("-vn", extract_command)
         self.assertIn("0:a:0", extract_command)
         self.assertIn("-acodec", extract_command)
         self.assertEqual(extract_command[extract_command.index("-acodec") + 1], "pcm_s16le")
-        self.assertFalse(audio_path.exists())
+        self.assertFalse(audio_wav_path.exists())
 
-        self.assertIn(str(audio_path), stitch_command)
-        self.assertIn("0:v:0", stitch_command)
-        self.assertIn("1:a:0", stitch_command)
-        self.assertNotIn("0:a:0?", stitch_command)
-        self.assertIn("-c:v", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-c:v") + 1], "libx264")
-        self.assertIn("-pix_fmt", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-pix_fmt") + 1], "yuv420p")
-        self.assertIn("-tag:v", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-tag:v") + 1], "avc1")
-        self.assertIn("-c:a", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-c:a") + 1], "aac")
-        self.assertIn("-profile:a", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-profile:a") + 1], "aac_low")
-        self.assertIn("-ar", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-ar") + 1], "48000")
-        self.assertIn("-ac", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-ac") + 1], "2")
-        self.assertIn("-tag:a", stitch_command)
-        self.assertEqual(stitch_command[stitch_command.index("-tag:a") + 1], "mp4a")
-        self.assertIn("+faststart", stitch_command)
+        self.assertEqual(audio_m4a_path.suffix, ".m4a")
+        self.assertIn(str(audio_wav_path), encode_audio_command)
+        self.assertIn("-c:a", encode_audio_command)
+        self.assertEqual(encode_audio_command[encode_audio_command.index("-c:a") + 1], "aac")
+        self.assertIn("-tag:a", encode_audio_command)
+        self.assertEqual(encode_audio_command[encode_audio_command.index("-tag:a") + 1], "mp4a")
+        self.assertFalse(audio_m4a_path.exists())
+
+        self.assertIn(str(source_path), encode_video_command)
+        self.assertIn("-an", encode_video_command)
+        self.assertIn("-c:v", encode_video_command)
+        self.assertEqual(encode_video_command[encode_video_command.index("-c:v") + 1], "libx264")
+        self.assertIn("-pix_fmt", encode_video_command)
+        self.assertEqual(encode_video_command[encode_video_command.index("-pix_fmt") + 1], "yuv420p")
+        self.assertIn("-tag:v", encode_video_command)
+        self.assertEqual(encode_video_command[encode_video_command.index("-tag:v") + 1], "avc1")
+        self.assertFalse(video_path.exists())
+
+        self.assertIn(str(video_path), mux_command)
+        self.assertIn(str(audio_m4a_path), mux_command)
+        self.assertIn("0:v:0", mux_command)
+        self.assertIn("1:a:0", mux_command)
+        self.assertIn("-c:v", mux_command)
+        self.assertEqual(mux_command[mux_command.index("-c:v") + 1], "copy")
+        self.assertIn("-c:a", mux_command)
+        self.assertEqual(mux_command[mux_command.index("-c:a") + 1], "copy")
+        self.assertIn("-tag:v", mux_command)
+        self.assertEqual(mux_command[mux_command.index("-tag:v") + 1], "avc1")
+        self.assertIn("-tag:a", mux_command)
+        self.assertEqual(mux_command[mux_command.index("-tag:a") + 1], "mp4a")
+        self.assertIn("+faststart", mux_command)
+
+        self.assertIn("-select_streams", verify_command)
+        self.assertIn("a:0", verify_command)
+
+    def test_mp4_audio_verification_rejects_video_only_output(self) -> None:
+        source_path = Path(self.tempdir.name) / "sample.mp4"
+        source_path.write_bytes(b"video-only")
+
+        def fake_probe(command, **kwargs):
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with patch.object(core, "resolve_ffprobe", return_value="/usr/bin/ffprobe"):
+            with patch.object(core.subprocess, "run", side_effect=fake_probe):
+                with self.assertRaisesRegex(RuntimeError, "audio stream"):
+                    core.verify_mp4_has_audio_stream(source_path, "/usr/bin/ffmpeg")
 
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
         captured_output: dict[str, Path] = {}
