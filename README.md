@@ -10,7 +10,7 @@ YouTube generally serves audio as Opus or AAC, not MP3. MP3 is a lossy format, s
 
 For no-extra-loss archiving, enable "Keep original source audio" so the app saves the original YouTube audio file alongside the MP3.
 
-For MP4 output, Snagger asks yt-dlp for H.264/AVC video in an MP4 container, then uses FFmpeg to normalize the final audio stream to AAC-LC stereo at 48 kHz. That avoids YouTube's AV1 (`av01`) MP4 streams and source audio variants that some editors such as Adobe Premiere may reject.
+For MP4 output, Snagger asks yt-dlp for H.264/AVC video in an MP4 container, then uses FFmpeg to create a fresh Adobe-friendly MP4 with H.264 video, yuv420p pixels, and AAC-LC stereo audio at 48 kHz. That avoids YouTube's AV1 (`av01`) MP4 streams and source audio/container variants that some editors such as Adobe Premiere may reject.
 
 ## Run the web app with Docker
 

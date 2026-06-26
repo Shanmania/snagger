@@ -315,11 +315,11 @@ def build_ydl_options(
     return options
 
 
-def normalize_mp4_audio_for_premiere(path: Path, ffmpeg_path: str) -> None:
-    temp_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}{path.suffix}")
+def transcode_mp4_for_premiere(path: Path, ffmpeg_path: str) -> None:
+    temp_path = path.with_name(f".snagger-premiere-{time.time_ns()}{path.suffix}")
     counter = 2
     while temp_path.exists():
-        temp_path = path.with_name(f".snagger-premiere-audio-{time.time_ns()}-{counter}{path.suffix}")
+        temp_path = path.with_name(f".snagger-premiere-{time.time_ns()}-{counter}{path.suffix}")
         counter += 1
 
     command = [
@@ -327,14 +327,26 @@ def normalize_mp4_audio_for_premiere(path: Path, ffmpeg_path: str) -> None:
         "-hide_banner",
         "-nostdin",
         "-y",
+        "-fflags",
+        "+genpts",
         "-i",
         str(path),
         "-map",
         "0:v:0",
         "-map",
-        "0:a:0?",
+        "0:a:0",
         "-c:v",
-        "copy",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        "18",
+        "-profile:v",
+        "high",
+        "-pix_fmt",
+        "yuv420p",
+        "-tag:v",
+        "avc1",
         "-c:a",
         "aac",
         "-profile:a",
@@ -345,8 +357,18 @@ def normalize_mp4_audio_for_premiere(path: Path, ffmpeg_path: str) -> None:
         "48000",
         "-ac",
         "2",
+        "-af",
+        "aresample=async=1:first_pts=0",
+        "-tag:a",
+        "mp4a",
+        "-map_metadata",
+        "0",
+        "-avoid_negative_ts",
+        "make_zero",
         "-movflags",
         "+faststart",
+        "-f",
+        "mp4",
         str(temp_path),
     ]
 
@@ -354,7 +376,7 @@ def normalize_mp4_audio_for_premiere(path: Path, ffmpeg_path: str) -> None:
         result = subprocess.run(command, capture_output=True, text=True)
         if result.returncode != 0:
             message = clean_message(result.stderr or result.stdout or "unknown FFmpeg error")
-            raise RuntimeError(f"Could not make Premiere-friendly MP4 audio: {message}")
+            raise RuntimeError(f"Could not make a Premiere-friendly MP4: {message}")
         temp_path.replace(path)
     finally:
         if temp_path.exists():
@@ -464,10 +486,10 @@ def download_media(
         if not output_paths:
             output_paths = locate_output_files(settings.output_dir, started_at, settings.output_format)
         if settings.output_format == "mp4" and output_paths:
-            events.put(("status", "Making MP4 audio Premiere-friendly..."))
+            events.put(("status", "Transcoding MP4 for Premiere..."))
             for output_path in output_paths:
-                normalize_mp4_audio_for_premiere(output_path, ydl_options["ffmpeg_location"])
-            events.put(("log", "Normalized MP4 audio for Premiere: AAC-LC stereo at 48 kHz."))
+                transcode_mp4_for_premiere(output_path, ydl_options["ffmpeg_location"])
+            events.put(("log", "Transcoded MP4 for Premiere: H.264 video and AAC-LC stereo at 48 kHz."))
         events.put(("progress", 100.0))
         if settings.allow_playlist:
             if output_paths:

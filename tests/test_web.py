@@ -61,8 +61,8 @@ class WebAppTest(unittest.TestCase):
         self.assertIn('class="log-shell"', html)
         self.assertIn('id="logCount"', html)
         self.assertIn('class="version-badge"', html)
-        self.assertIn("v0.2.1", html)
-        self.assertIn("Updated 2026-06-26 00:50 CDT", html)
+        self.assertIn("v0.2.2", html)
+        self.assertIn("Updated 2026-06-26 01:06 CDT", html)
         self.assertIn('id="previewPanel"', html)
         self.assertIn("Keep original source audio</span>", html)
 
@@ -563,7 +563,7 @@ class WebAppTest(unittest.TestCase):
         self.assertNotIn("bestvideo+bestaudio/best", options["format"])
         self.assertEqual(options["merge_output_format"], "mp4")
 
-    def test_mp4_audio_normalizer_forces_premiere_safe_aac(self) -> None:
+    def test_mp4_transcoder_forces_premiere_safe_codecs(self) -> None:
         source_path = Path(self.tempdir.name) / "sample.mp4"
         source_path.write_bytes(b"original")
         captured_command: list[str] = []
@@ -574,11 +574,19 @@ class WebAppTest(unittest.TestCase):
             return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
         with patch.object(core.subprocess, "run", side_effect=fake_run):
-            core.normalize_mp4_audio_for_premiere(source_path, "/usr/bin/ffmpeg")
+            core.transcode_mp4_for_premiere(source_path, "/usr/bin/ffmpeg")
 
         self.assertEqual(source_path.read_bytes(), b"normalized")
+        self.assertIn("-map", captured_command)
+        self.assertIn("0:v:0", captured_command)
+        self.assertIn("0:a:0", captured_command)
+        self.assertNotIn("0:a:0?", captured_command)
         self.assertIn("-c:v", captured_command)
-        self.assertEqual(captured_command[captured_command.index("-c:v") + 1], "copy")
+        self.assertEqual(captured_command[captured_command.index("-c:v") + 1], "libx264")
+        self.assertIn("-pix_fmt", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-pix_fmt") + 1], "yuv420p")
+        self.assertIn("-tag:v", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-tag:v") + 1], "avc1")
         self.assertIn("-c:a", captured_command)
         self.assertEqual(captured_command[captured_command.index("-c:a") + 1], "aac")
         self.assertIn("-profile:a", captured_command)
@@ -587,6 +595,8 @@ class WebAppTest(unittest.TestCase):
         self.assertEqual(captured_command[captured_command.index("-ar") + 1], "48000")
         self.assertIn("-ac", captured_command)
         self.assertEqual(captured_command[captured_command.index("-ac") + 1], "2")
+        self.assertIn("-tag:a", captured_command)
+        self.assertEqual(captured_command[captured_command.index("-tag:a") + 1], "mp4a")
         self.assertIn("+faststart", captured_command)
 
     def test_server_deploy_uses_configured_output_dir_and_persists(self) -> None:
